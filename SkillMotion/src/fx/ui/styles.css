@@ -1,0 +1,812 @@
+/* ==========================================================================
+   Skill Motion - The 2-in-1 Premiere Pro + After Effects Suite Styling
+   ========================================================================== */
+
+:root {
+  --fx-bg-base: #181818;
+  --fx-bg-panel: #181818;
+  --fx-bg-card: #252526;
+  --fx-bg-hover: #2a2d2e;
+  --fx-bg-active: #37373d;
+
+  --fx-border: #2b2b2b;
+  --fx-border-bright: rgba(0, 120, 212, 0.35);
+
+  --fx-cyan: #4daafc;
+  --fx-cyan-glow: rgba(0, 120, 212, 0.25);
+  --fx-violet: #a855f7;
+  --fx-pink: #ec4899;
+  --fx-amber: #f59e0b;
+  --fx-emerald: #2ea043;
+  --fx-rose: #f85149;
+
+  --fx-text-primary: #cccccc;
+  --fx-text-secondary: #9d9d9d;
+  --fx-text-muted: #6e7681;
+
+  --fx-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --fx-font-mono: 'JetBrains Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body, html {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--fx-bg-base);
+  color: var(--fx-text-primary);
+  font-family: var(--fx-font-sans);
+  font-size: 13px;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* App Container */
+.fx-app {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: var(--fx-bg-base);
+}
+
+/* Top Header Bar */
+.fx-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 16px;
+  background-color: var(--fx-bg-panel);
+  border-bottom: 1px solid var(--fx-border);
+  gap: 16px;
+  z-index: 50;
+}
+
+.fx-brand-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fx-logo-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: conic-gradient(from 200deg, #0078d4, #4daafc, #2ea043, #0078d4);
+  border-radius: 6px;
+  font-weight: 900;
+  font-size: 14px;
+  color: #ffffff;
+  box-shadow: 0 0 12px rgba(0, 120, 212, 0.45);
+  letter-spacing: -0.5px;
+}
+
+.fx-brand-title {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.3px;
+  color: var(--fx-text-primary);
+}
+
+.fx-brand-tag {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  background: rgba(0, 120, 212, 0.15);
+  color: var(--fx-cyan);
+  border: 1px solid rgba(0, 120, 212, 0.3);
+  border-radius: 4px;
+}
+
+/* Workspace Tabs */
+.fx-workspaces {
+  display: flex;
+  align-items: center;
+  background: var(--fx-bg-base);
+  border: 1px solid var(--fx-border);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.fx-workspace-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--fx-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fx-workspace-tab:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.fx-workspace-tab.active {
+  color: #ffffff;
+  background: var(--fx-bg-active);
+  border: 1px solid var(--fx-border-bright);
+}
+
+/* TopBar Actions */
+.fx-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fx-chip-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--fx-bg-card);
+  border: 1px solid var(--fx-border);
+  border-radius: 6px;
+  color: var(--fx-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fx-chip-btn:hover {
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.fx-export-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: #0078d4;
+  border: 1px solid #0078d4;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.fx-export-btn:hover {
+  background: #026ec1;
+}
+
+/* Main Workspace Layout */
+.fx-workspace-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.fx-main-split {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.fx-center-stage {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  background: var(--fx-bg-base);
+}
+
+/* Left & Right Panels */
+.fx-side-panel {
+  width: 320px;
+  min-width: 280px;
+  background: var(--fx-bg-panel);
+  border-right: 1px solid var(--fx-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.fx-side-panel.right {
+  width: 360px;
+  min-width: 300px;
+  border-right: none;
+  border-left: 1px solid var(--fx-border);
+}
+
+.fx-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 14px;
+  background: var(--fx-bg-card);
+  border-bottom: 1px solid var(--fx-border);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fx-text-secondary);
+}
+
+.fx-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* Program Monitor Stage */
+.fx-monitor-stage {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  background: #06070a;
+  position: relative;
+}
+
+.fx-monitor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 12px;
+  background: var(--fx-bg-card);
+  border-bottom: 1px solid var(--fx-border);
+}
+
+.fx-monitor-canvas-wrap {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+  background: #1f1f1f;
+}
+
+.fx-monitor-canvas {
+  max-width: 95%;
+  max-height: 95%;
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.8), 0 0 1px rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+/* Live VU Meter Bar on Monitor Edge */
+.fx-monitor-vu-meter {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 4px;
+  background: rgba(24, 24, 24, 0.8);
+  padding: 6px 4px;
+  border-radius: 6px;
+  border: 1px solid var(--fx-border);
+  backdrop-filter: blur(8px);
+  z-index: 20;
+}
+
+.fx-vu-bar-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.fx-vu-channel-bar {
+  width: 6px;
+  height: 120px;
+  background: #2b2b2b;
+  border-radius: 3px;
+  position: relative;
+  overflow: hidden;
+}
+
+.fx-vu-channel-fill {
+  position: absolute;
+  bottom: 0;
+  width: 100%;
+  background: linear-gradient(to top, #2ea043 0%, #f59e0b 70%, #f85149 100%);
+  border-radius: 3px;
+  transition: height 0.05s ease;
+}
+
+/* Transport Controls Bar */
+.fx-transport-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 16px;
+  background: var(--fx-bg-panel);
+  border-top: 1px solid var(--fx-border);
+  border-bottom: 1px solid var(--fx-border);
+  gap: 16px;
+}
+
+.fx-transport-center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fx-btn-transport {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: var(--fx-bg-card);
+  border: 1px solid var(--fx-border);
+  color: var(--fx-text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fx-btn-transport:hover {
+  background: var(--fx-bg-hover);
+  color: var(--fx-cyan);
+  border-color: rgba(0, 120, 212, 0.3);
+}
+
+.fx-btn-transport.play {
+  width: 38px;
+  height: 38px;
+  background: #0078d4;
+  border-color: #0078d4;
+}
+
+.fx-btn-transport.active {
+  color: var(--fx-cyan);
+  border-color: var(--fx-cyan);
+  background: rgba(0, 120, 212, 0.15);
+}
+
+.fx-timecode-display {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--fx-font-mono);
+  background: rgba(0, 0, 0, 0.5);
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--fx-border);
+}
+
+.fx-timecode-current {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--fx-cyan);
+  letter-spacing: 1px;
+}
+
+.fx-timecode-total {
+  font-size: 11px;
+  color: var(--fx-text-muted);
+}
+
+/* Timeline Panel */
+.fx-timeline-panel {
+  height: 280px;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  background: var(--fx-bg-panel);
+  border-top: 1px solid var(--fx-border);
+  position: relative;
+  overflow: hidden;
+}
+
+.fx-timeline-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 12px;
+  background: var(--fx-bg-card);
+  border-bottom: 1px solid var(--fx-border);
+}
+
+.fx-tools-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fx-tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fx-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fx-tool-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.fx-tool-btn.active {
+  color: var(--fx-cyan);
+  background: rgba(0, 120, 212, 0.15);
+  border-color: rgba(0, 120, 212, 0.4);
+}
+
+/* Timeline Layout: Left Track Headers & Right Timeline Canvas */
+.fx-timeline-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.fx-track-headers {
+  width: 180px;
+  min-width: 180px;
+  background: var(--fx-bg-card);
+  border-right: 1px solid var(--fx-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 10;
+}
+
+.fx-track-header-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--fx-border);
+  background: var(--fx-bg-panel);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fx-text-secondary);
+}
+
+.fx-track-header-item.selected {
+  background: rgba(0, 120, 212, 0.1);
+  color: var(--fx-cyan);
+}
+
+.fx-track-ctrls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fx-track-icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--fx-text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+}
+
+.fx-track-icon-btn:hover {
+  color: #ffffff;
+}
+
+.fx-track-icon-btn.active {
+  color: var(--fx-cyan);
+}
+
+/* Timeline Ruler & Track Lanes */
+.fx-timeline-viewport {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-x: auto;
+  overflow-y: hidden;
+  position: relative;
+  background: #181818;
+}
+
+.fx-timeline-ruler {
+  height: 26px;
+  background: #0f121b;
+  border-bottom: 1px solid var(--fx-border);
+  position: relative;
+  cursor: pointer;
+}
+
+.fx-timeline-lanes {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.fx-track-lane {
+  position: relative;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.fx-track-lane.drop-target {
+  background: var(--fx-cyan-glow);
+  box-shadow: inset 0 0 0 1px var(--fx-border-bright);
+}
+
+.fx-asset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--fx-bg-card);
+  border: 1px solid var(--fx-border);
+  border-radius: 6px;
+  cursor: grab;
+  transition: border-color 0.15s ease;
+}
+
+.fx-asset-row:hover {
+  border-color: var(--fx-border-bright);
+}
+
+.fx-asset-thumb {
+  width: 48px;
+  height: 27px;
+  flex-shrink: 0;
+  border-radius: 3px;
+  background: #000 center / cover no-repeat;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fx-asset-meta {
+  font-size: 10px;
+  color: var(--fx-text-muted);
+  font-family: var(--fx-font-mono);
+}
+
+.fx-bin-drop {
+  outline: 2px dashed var(--fx-border-bright);
+  outline-offset: -6px;
+}
+
+.fx-timeline-clip {
+  position: absolute;
+  top: 4px;
+  height: calc(100% - 8px);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 4px 8px;
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.fx-timeline-clip:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.fx-timeline-clip.selected {
+  border: 2px solid #4daafc;
+}
+
+.fx-clip-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+/* Keyframe Diamonds Row on Clip */
+.fx-clip-keyframes-row {
+  display: flex;
+  align-items: center;
+  height: 10px;
+  position: relative;
+}
+
+.fx-keyframe-diamond {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #4daafc;
+  transform: rotate(45deg);
+  border: 1px solid #ffffff;
+  cursor: pointer;
+}
+
+/* Playhead Marker */
+.fx-playhead-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #f85149;
+  box-shadow: 0 0 8px rgba(248, 81, 73, 0.8);
+  pointer-events: none;
+  z-index: 40;
+}
+
+.fx-playhead-head {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  width: 14px;
+  height: 16px;
+  background: #f85149;
+  clip-path: polygon(0% 0%, 100% 0%, 100% 60%, 50% 100%, 0% 60%);
+  cursor: ew-resize;
+  z-index: 41;
+}
+
+/* Effect Controls Panel Form Elements */
+.fx-property-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.fx-property-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fx-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.fx-stopwatch-btn {
+  background: transparent;
+  border: none;
+  color: var(--fx-text-muted);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.fx-stopwatch-btn:hover {
+  color: #ffffff;
+}
+
+.fx-stopwatch-btn.active {
+  color: #4daafc;
+}
+
+.fx-slider-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 150px;
+}
+
+.fx-slider {
+  flex: 1;
+  accent-color: #4daafc;
+  height: 4px;
+  cursor: pointer;
+}
+
+.fx-val-badge {
+  font-family: var(--fx-font-mono);
+  font-size: 11px;
+  color: #ffffff;
+  width: 42px;
+  text-align: right;
+}
+
+/* VFX Effect Card */
+.fx-effect-card {
+  background: var(--fx-bg-card);
+  border: 1px solid var(--fx-border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+.fx-effect-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+/* Modals */
+.fx-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.fx-modal-window {
+  width: 540px;
+  max-width: 90vw;
+  background: var(--fx-bg-panel);
+  border: 1px solid var(--fx-border-bright);
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 20px var(--fx-cyan-glow);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.fx-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  background: var(--fx-bg-card);
+  border-bottom: 1px solid var(--fx-border);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.fx-modal-body {
+  padding: 20px;
+  max-height: 75vh;
+  overflow-y: auto;
+}
+
+.fx-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 14px 20px;
+  background: var(--fx-bg-card);
+  border-top: 1px solid var(--fx-border);
+}

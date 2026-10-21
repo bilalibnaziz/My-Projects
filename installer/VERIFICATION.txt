@@ -1,0 +1,23 @@
+SKILL SUITE v1.0 — INSTALLER VERIFICATION REPORT
+Timestamp: 2026-10-18T16:25:38.305Z
+Platforms: macOS (Apple Silicon + Intel Universal) & Windows (x64/x86)
+
+====================================================================================
+FILE CHECKSUMS (SHA-256)
+====================================================================================
+
+[macOS Disk Images]
+ - SkillMotion-v1.0.dmg                 Size:   4.31 MB | SHA256: e9f4bc37e130c2b2c9be30980432de1f0ee68255c6cdd9ae03175af3ef57b322
+ - SkillPhoto-v1.0.dmg                  Size:  42.44 MB | SHA256: cc641ca66eb1839f3122b25008a79247443f617ad7fbb04b904eaf4675d11f8b
+ - SkillSuite-v1.0-All-In-One.dmg       Size:  58.97 MB | SHA256: 887490f0a1255a34366bcc68e63f7de5c5a7c83552ba52649352160a66d73791
+ - SkillVector-v1.0.dmg                 Size:  11.94 MB | SHA256: a19f0791fb36a8f40a9a10cfe170c2a42d6339a219d821e02646042fa63bb2c8
+
+[macOS Application Bundles]
+ - Skill Photo          Universal Binary SHA256: 99661e05aa42cc995ba04bfdd3e442201eaf5d9811a48da5007d051abc35e1e5
+ - Skill Vector         Universal Binary SHA256: d7159c17428f1448e2d658bae0d132efb07fcbc96b78644cc26f96273058bc47
+ - Skill Motion         Universal Binary SHA256: b1877c431d06284c5b9d6218c24251a33e37f624898e09072ba91587e66713ba
+
+[Windows Packages]
+ - SkillMotion-v1.0-Windows
+ - SkillPhoto-v1.0-Windows
+ - SkillVector-v1.0-Windows
