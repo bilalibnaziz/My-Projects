@@ -22,6 +22,9 @@ import { transformAgain } from './transformAgain';
 import { offsetSelected, roundCornersSelected } from './pathOps';
 import { canMakeButton, hasButton, makeButton, releaseButton } from './button';
 
+import { toggleAssistant } from '../ai/open';
+import { runFusion } from './fusionOps';
+
 export type MenuId = 'File' | 'Edit' | 'Image' | 'Layer' | 'Select' | 'Filter' | 'View' | 'Window' | 'Help';
 
 export interface Command {
@@ -112,6 +115,20 @@ export const COMMANDS: Command[] = [
         store.toast(`Exported ${store.state.docs.length} documents`, 'success');
       }),
   },
+  {
+    id: 'merge-hdr',
+    label: 'Merge to HDR (Exposure Fusion)…',
+    menu: 'File',
+    submenu: 'Automate',
+    run: () => void runFusion('exposure'),
+  },
+  {
+    id: 'focus-stack',
+    label: 'Focus Stack…',
+    menu: 'File',
+    submenu: 'Automate',
+    run: () => void runFusion('focus'),
+  },
   { id: 'revert-image', label: 'Revert to Saved / Original', menu: 'File', sep: true, enabled: () => !!store.doc && (store.doc.hIndex > 0 || store.doc.dirty), run: () => { const d = store.doc; if (!d) return; while (d.hIndex > 0) store.undo(); store.toast(`Reverted “${d.title}”`); } },
   { id: 'close', label: 'Close Document', menu: 'File', keys: 'Mod+W', sep: true, enabled: hasDoc, run: () => store.doc && store.closeDoc(store.doc.id) },
 
@@ -140,6 +157,12 @@ export const COMMANDS: Command[] = [
   { id: 'preferences', label: 'Preferences…', menu: 'Edit', keys: 'Mod+,', sep: true, run: () => store.set({ dialog: { type: 'preferences' } }) },
 
   // ---------------------------------------------------------------- Image
+  { id: 'mode-rgb', label: 'RGB Color', menu: 'Image', submenu: 'Mode', enabled: hasDoc, checked: () => (store.doc?.colorMode ?? 'rgb') === 'rgb', run: () => ops.convertColorMode('rgb') },
+  { id: 'mode-cmyk', label: 'CMYK Color', menu: 'Image', submenu: 'Mode', sep: true, enabled: hasDoc, checked: () => store.doc?.colorMode === 'cmyk', run: () => ops.convertColorMode('cmyk') },
+  { id: 'mode-8bit', label: '8 Bits per Channel', menu: 'Image', submenu: 'Mode', enabled: hasDoc, checked: () => (store.doc?.depth ?? 8) === 8, run: () => ops.convertBitDepth(8) },
+  { id: 'mode-16bit', label: '16 Bits per Channel', menu: 'Image', submenu: 'Mode', enabled: hasDoc, checked: () => store.doc?.depth === 16, run: () => ops.convertBitDepth(16) },
+  { id: 'mode-32bit', label: '32 Bits per Channel (Float)', menu: 'Image', submenu: 'Mode', enabled: hasDoc, checked: () => store.doc?.depth === 32, run: () => ops.convertBitDepth(32) },
+
   { id: 'brightness-contrast', label: 'Brightness / Contrast…', menu: 'Image', submenu: 'Adjustments', enabled: hasDoc, run: () => { panelHooks.open('adjust'); ops.ensureAdjustmentTarget(); } },
   { id: 'levels', label: 'Levels…', menu: 'Image', submenu: 'Adjustments', keys: 'Mod+L', enabled: hasDoc, run: () => { panelHooks.open('adjust'); ops.ensureAdjustmentTarget(); } },
   { id: 'curves', label: 'Curves…', menu: 'Image', submenu: 'Adjustments', keys: 'Mod+M', enabled: hasDoc, run: () => { panelHooks.open('adjust'); ops.ensureAdjustmentTarget(); } },
@@ -176,10 +199,15 @@ export const COMMANDS: Command[] = [
   },
   { id: 'looks', label: 'Looks & LUTs…', menu: 'Image', keys: 'Mod+Shift+K', sep: true, enabled: hasDoc, run: () => openLooks() },
   { id: 'image-size', label: 'Image Size…', menu: 'Image', keys: 'Mod+Alt+I', sep: true, enabled: hasDoc, run: () => store.set({ dialog: { type: 'imageSize' } }) },
+  { id: 'sky-replacement', label: 'Sky Replacement…', menu: 'Edit', enabled: hasDoc, run: () => store.set({ dialog: { type: 'skyReplace' } }) },
+  { id: 'content-aware-scale', label: 'Content-Aware Scale…', menu: 'Image', keys: 'Mod+Alt+Shift+C', enabled: hasDoc, run: () => store.set({ dialog: { type: 'contentAwareScale' } }) },
   { id: 'canvas-size', label: 'Canvas Size…', menu: 'Image', keys: 'Mod+Alt+C', enabled: hasDoc, run: () => store.set({ dialog: { type: 'canvasSize' } }) },
   { id: 'crop-tool', label: 'Crop…', menu: 'Image', enabled: hasDoc, run: () => store.setTool('crop') },
+  { id: 'perspective-crop', label: 'Perspective Crop…', menu: 'Image', enabled: hasDoc, run: () => store.setTool('perspective-crop') },
   { id: 'crop-sel', label: 'Crop to Selection', menu: 'Image', enabled: hasSel, run: () => ops.cropToSelection() },
   { id: 'trim', label: 'Trim Transparent Pixels', menu: 'Image', enabled: hasDoc, run: () => ops.trimTransparent() },
+  { id: 'space-srgb', label: 'sRGB', menu: 'Image', submenu: 'Color Space', sep: true, enabled: hasDoc, checked: () => !!store.doc && (store.doc.colorSpace ?? 'srgb') === 'srgb', run: () => ops.convertColorSpace('srgb') },
+  { id: 'space-p3', label: 'Display P3 (wide gamut)', menu: 'Image', submenu: 'Color Space', enabled: hasDoc, checked: () => store.doc?.colorSpace === 'display-p3', run: () => ops.convertColorSpace('display-p3') },
   { id: 'rot-cw', label: 'Rotate 90° Clockwise', menu: 'Image', submenu: 'Rotate Canvas', sep: true, enabled: hasDoc, run: () => ops.rotateCanvas('cw') },
   { id: 'rot-ccw', label: 'Rotate 90° Counter-Clockwise', menu: 'Image', submenu: 'Rotate Canvas', enabled: hasDoc, run: () => ops.rotateCanvas('ccw') },
   { id: 'rot-180', label: 'Rotate 180°', menu: 'Image', submenu: 'Rotate Canvas', enabled: hasDoc, run: () => ops.rotateCanvas('180') },
@@ -637,6 +665,7 @@ export const COMMANDS: Command[] = [
   { id: 'win-active-toolbox', label: 'Floating Active Toolbox', menu: 'Window', sep: true, checked: () => store.state.opts.activeToolbox, run: () => store.setOpts({ activeToolbox: !store.state.opts.activeToolbox }) },
   { id: 'win-focus', label: 'Focus Mode (Hide Panels)', menu: 'Window', keys: 'Tab', checked: () => store.state.focusMode, run: () => store.set({ focusMode: !store.state.focusMode }) },
   { id: 'win-palette', label: 'Command Palette…', menu: 'Window', keys: 'Mod+K', sep: true, run: () => store.set({ paletteOpen: true }) },
+  { id: 'ai-assistant', label: 'AI Assistant (Claude · ChatGPT · Gemini)…', menu: 'Window', keys: 'Mod+Alt+K', run: () => toggleAssistant() },
 
   // ---------------------------------------------------------------- Help
   { id: 'shortcuts', label: 'Keyboard Shortcuts', menu: 'Help', keys: 'Mod+/', run: () => store.set({ dialog: { type: 'shortcuts' } }) },
@@ -674,7 +703,7 @@ export const TOOL_KEYS: Record<string, ToolId[]> = {
   m: ['marquee-rect', 'marquee-ellipse'],
   l: ['lasso', 'poly-lasso'],
   w: ['quick-select', 'wand'],
-  c: ['crop'],
+  c: ['crop', 'perspective-crop'],
   i: ['eyedropper', 'color-sampler', 'ruler'],
   b: ['brush', 'pencil', 'color-replace'],
   e: ['eraser', 'bg-eraser', 'magic-eraser'],

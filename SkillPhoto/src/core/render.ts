@@ -5,7 +5,7 @@ import { compositeCustom, isCustomBlend } from './blend';
 import { warpText } from './warp';
 import { drawLayout, layoutText } from './text';
 import type { BlendMode } from './types';
-import { createCanvas, ctx2d, rev, scratch, touch } from './canvas';
+import { createCanvas, ctx2d, rev, scratch, touch, spaceOf, pixelsLike } from './canvas';
 import { filletedRings, hasPathCorners, liveShapePath } from './shapeGeometry';
 import { flattenAnchors, maxWidth, variableStrokeOutline } from './strokeProfile';
 import { getAdjustEngine, isIdentityAdjust } from './gl';
@@ -380,8 +380,8 @@ export function layerSurface(layer: Layer): Surface | null {
     surf = { canvas: c, x: box.x, y: box.y };
     if (warped) {
       const r = warpText(ctx2d(c).getImageData(0, 0, c.width, c.height).data, c.width, c.height, t.warp!.style, t.warp!.bend);
-      const wc = createCanvas(r.width, r.height);
-      ctx2d(wc).putImageData(new ImageData(r.data as Uint8ClampedArray<ArrayBuffer>, r.width, r.height), 0, 0);
+      const wc = createCanvas(r.width, r.height, spaceOf(c));
+      ctx2d(wc).putImageData(pixelsLike(c, r.data as Uint8ClampedArray, r.width, r.height), 0, 0);
       surf = { canvas: wc, x: surf.x + Math.round(r.dx), y: surf.y + Math.round(r.dy) };
     }
   } else if (layer.kind === 'shape' && layer.shape) {
@@ -571,7 +571,9 @@ function drawBlended(v: RenderView, target: HTMLCanvasElement, surf: Surface, al
   const ctx = ctx2d(target);
   ctx.save();
   ctx.globalAlpha = alpha;
-  ctx.globalCompositeOperation = blend === 'normal' ? (atop ? 'source-atop' : 'source-over') : (blend as GlobalCompositeOperation);
+  // Pass Through only means something for a group drawn by compositeList; anything else draws normally
+  const plain = blend === 'normal' || blend === 'pass-through';
+  ctx.globalCompositeOperation = plain ? (atop ? 'source-atop' : 'source-over') : (blend as GlobalCompositeOperation);
   drawAt(ctx, v, surf);
   ctx.restore();
 }
@@ -739,6 +741,48 @@ function drawLayer(rc: RenderCtx, target: HTMLCanvasElement, layer: Layer, below
 }
 
 /** Composites a list of sibling layers onto `target`. Returns the accumulated signature. */
+/**
+ * A pass-through group: its contents straight onto the target (so a soft-light or adjustment layer inside
+ * works on everything below the group). With group opacity or a mask, the contents go onto a copy of
+ * what's below, which is then mixed back by that opacity and mask.
+ */
+function drawPassThrough(rc: RenderCtx, target: HTMLCanvasElement, g: Layer, sig: string, level: number) {
+  if (level >= 32) return; // Nesting guard (corrupt files with parent cycles)
+  const kids = rc.kids.get(g.id) ?? [];
+  const gx = Math.round(g.x);
+  const gy = Math.round(g.y);
+  // A dragged group's pending offset moves its contents
+  const view = gx || gy ? { ...rc.view, ox: rc.view.ox - gx * rc.view.s, oy: rc.view.oy - gy * rc.view.s } : rc.view;
+  const crc: RenderCtx = view === rc.view ? rc : { ...rc, view, vsig: rc.vsig ? viewSig(view) : '' };
+  const masked = !!g.mask?.enabled;
+  if (g.opacity >= 1 && !masked) {
+    compositeList(crc, target, kids, `P${g.id}|${sig}`, level + 1);
+    return;
+  }
+  const mix = scratch(`pass${level}`, target.width, target.height);
+  const m = ctx2d(mix);
+  m.save();
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.globalAlpha = 1;
+  m.globalCompositeOperation = 'copy';
+  m.drawImage(target, 0, 0);
+  m.restore();
+  compositeList(crc, mix, kids, `P${g.id}|${sig}`, level + 1);
+  if (masked) {
+    m.save();
+    m.globalCompositeOperation = 'destination-in';
+    drawAt(m, rc.view, { canvas: g.mask!.canvas, x: g.mask!.x, y: g.mask!.y });
+    m.restore();
+  }
+  const t = ctx2d(target);
+  t.save();
+  t.setTransform(1, 0, 0, 1, 0, 0);
+  t.globalAlpha = g.opacity;
+  t.globalCompositeOperation = 'source-over';
+  t.drawImage(mix, 0, 0);
+  t.restore();
+}
+
 function compositeList(rc: RenderCtx, target: HTMLCanvasElement, list: Layer[], sig: string, level: number): string {
   let i = 0;
   while (i < list.length) {
@@ -747,6 +791,14 @@ function compositeList(rc: RenderCtx, target: HTMLCanvasElement, list: Layer[], 
     while (j < list.length && list[j].clip) j++;
     const clipEnd = j;
     const visible = base.visible && base.opacity > 0;
+
+    // A pass-through group's contents blend with what's below it, as if they weren't grouped
+    if (base.kind === 'group' && base.blend === 'pass-through' && clipEnd === i + 1 && !hasFx(base)) {
+      if (visible) drawPassThrough(rc, target, base, sig, level);
+      sig += nodeSig(rc, base);
+      i++;
+      continue;
+    }
 
     if (clipEnd === i + 1 || base.kind === 'adjustment') {
       if (visible) drawLayer(rc, target, base, sig, level);
@@ -815,13 +867,20 @@ export function renderDocument(doc: Doc, target: HTMLCanvasElement, overrides?: 
  * an adjustment slider, everything underneath is reused instead of recomposited.
  */
 export class DocRenderer {
-  readonly output = createCanvas(1, 1);
-  private below = createCanvas(1, 1);
+  output = createCanvas(1, 1, 'srgb');
+  private below = createCanvas(1, 1, 'srgb');
   private belowSig = '';
   private lastSig = '';
 
   /** With a `view`, renders that part of the document at its zoom (output is view.w × view.h). */
   render(doc: Doc, overrides?: Overrides, view?: RenderView): HTMLCanvasElement {
+    // The buffers work in the document's colour space (an sRGB buffer would clip a P3 photo on screen)
+    const space = doc.colorSpace ?? 'srgb';
+    if (spaceOf(this.output) !== space) {
+      this.output = createCanvas(1, 1, space);
+      this.below = createCanvas(1, 1, space);
+      this.invalidate();
+    }
     const rc = makeRc(doc, overrides, view);
     const width = rc.view.w;
     const height = rc.view.h;

@@ -5,7 +5,7 @@ import {
   Folder, FolderOpen, FolderPlus, ChevronRight, ChevronDown, Search, Grid2x2Check, Box, Filter, X,
 } from 'lucide-react';
 import type { Layer, TextStyle } from '../core/types';
-import { BLEND_MODES, LAYER_LABELS, hasFx, withLayer } from '../core/types';
+import { BLEND_MODES, LAYER_LABELS, PASS_THROUGH, hasFx, withLayer } from '../core/types';
 import { setFill, copyStyle, pasteStyle, canPasteStyle, clearStyle } from '../core/layerStyle';
 import { filterById } from '../core/filters';
 import { pickFiles } from '../core/io';
@@ -95,7 +95,7 @@ export function LayersPanel() {
           className="blend-select"
           value={active?.blend ?? 'normal'}
           title="Blend mode"
-          options={BLEND_MODES.map((b) => ({ value: b.id, label: b.label }))}
+          options={[...(active?.kind === 'group' ? [PASS_THROUGH] : []), ...BLEND_MODES].map((b) => ({ value: b.id, label: b.label }))}
           onChange={(v) => active && ops.updateSelectedLayers({ blend: v }, 'Blend Mode')}
         />
         <IconButton
@@ -349,7 +349,7 @@ export function LayersPanel() {
                     fx
                   </button>
                 )}
-                {layer.blend !== 'normal' && <span className="badge">{BLEND_MODES.find((b) => b.id === layer.blend)?.label.split(' ')[0]}</span>}
+                {layer.blend !== 'normal' && layer.blend !== 'pass-through' && <span className="badge">{BLEND_MODES.find((b) => b.id === layer.blend)?.label.split(' ')[0]}</span>}
                 {layer.opacity < 1 && <span className="badge">{Math.round(layer.opacity * 100)}%</span>}
                 {layer.lockAlpha && <Grid2x2Check size={10} />}
                 {layer.locked && <Lock size={10} />}

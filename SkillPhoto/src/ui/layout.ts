@@ -155,7 +155,8 @@ const DEFAULT: Layout = {
 function load(): Layout {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...DEFAULT, ...JSON.parse(raw) };
+    // The narrow-window drawer is a passing overlay: it never comes back open over the canvas on reload
+    if (raw) return { ...DEFAULT, ...JSON.parse(raw), dockOpen: false };
   } catch {
     /* storage unavailable */
   }

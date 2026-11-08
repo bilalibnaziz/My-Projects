@@ -10,6 +10,9 @@ export default defineConfig({
   plugins: [react()],
   server: { headers: isolation },
   preview: { headers: isolation },
+  // The AI worker imports onnxruntime-web; found only at first use, the dev server would
+  // pre-bundle it then and reload the page (losing the open document)
+  optimizeDeps: { include: ['onnxruntime-web/wasm'] },
   test: {
     environment: 'jsdom',
     globals: true,

@@ -110,7 +110,7 @@ export function groupLayers(layers: Layer[], ids: string[], name: string): { lay
   const top = roots[roots.length - 1];
   // The new group lives where the topmost picked layer was
   const parent = parentOf(map, top);
-  const group = makeLayer({ kind: 'group', name, parent });
+  const group = makeLayer({ kind: 'group', name, parent, blend: 'pass-through' }); // Photoshop's default
   const rootIds = new Set(roots.map((l) => l.id));
   const out: Layer[] = [];
   for (const l of layers) {

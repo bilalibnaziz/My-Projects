@@ -16,9 +16,11 @@
     "test:e2e": "node e2e/run.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.4.0",
     "@tauri-apps/api": "^2.12.3",
     "ag-psd": "31.0.2",
     "lucide-react": "^1.55.0",
+    "pdfjs-dist": "4.10.38",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

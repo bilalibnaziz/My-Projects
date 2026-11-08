@@ -111,7 +111,7 @@ export function LooksPanel() {
       const t0 = performance.now();
       while (queue.length && performance.now() - t0 < 12) {
         const t = queue.shift()!;
-        const img = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
+        const img = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height, { colorSpace: source.colorSpace });
         applyLutToPixels(img.data, t.lut());
         done.set(t.id, img);
       }

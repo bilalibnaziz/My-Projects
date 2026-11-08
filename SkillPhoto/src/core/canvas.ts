@@ -1,20 +1,105 @@
 import type { Rect } from './types';
 
-export function createCanvas(width: number, height: number): HTMLCanvasElement {
+// ------------------------------------------------------------ colour spaces
+// A document works in sRGB or Display P3. Its canvases are created in that space (a canvas's space is
+// fixed when its context is made), so wide-gamut photos keep their colours while edited. drawImage
+// between canvases of different spaces converts colours; pixel buffers are tagged with the space their
+// numbers came from (pixelsLike / spaceOf), so putImageData converts them correctly too.
+
+export type ColorSpaceId = 'srgb' | 'display-p3';
+
+let working: ColorSpaceId = 'srgb';
+const spaces = new WeakMap<HTMLCanvasElement, ColorSpaceId>();
+
+/** The space new canvases are made in: the active document's (set by the store). */
+export function setWorkingSpace(space: ColorSpaceId) {
+  working = space;
+}
+export const workingSpace = (): ColorSpaceId => working;
+
+/** The space a canvas's pixels are in. */
+export const spaceOf = (c: HTMLCanvasElement): ColorSpaceId => spaces.get(c) ?? 'srgb';
+
+/** Gives a canvas made elsewhere (e.g. by React) a space; only before its first ctx2d call. */
+export function setCanvasSpace(c: HTMLCanvasElement, space: ColorSpaceId) {
+  if (space === 'srgb') spaces.delete(c);
+  else spaces.set(c, space);
+}
+
+export function createCanvas(width: number, height: number, space: ColorSpaceId = working): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(width));
   c.height = Math.max(1, Math.round(height));
+  if (space !== 'srgb') spaces.set(c, space);
   return c;
 }
 
 export function ctx2d(c: HTMLCanvasElement): CanvasRenderingContext2D {
-  const ctx = c.getContext('2d');
+  const space = spaces.get(c);
+  const ctx = space ? c.getContext('2d', { colorSpace: space }) : c.getContext('2d');
   if (!ctx) throw new Error('2D canvas context unavailable');
   return ctx;
 }
 
+/** An ImageData whose numbers are in `like`'s space (a canvas, an ImageData, or a space name). */
+export function pixelsLike(like: HTMLCanvasElement | ImageData | ColorSpaceId, data: Uint8ClampedArray, width: number, height: number): ImageData {
+  const colorSpace = typeof like === 'string' ? like : like instanceof HTMLCanvasElement ? spaceOf(like) : ((like.colorSpace as ColorSpaceId) ?? 'srgb');
+  return new ImageData(data as Uint8ClampedArray<ArrayBuffer>, width, height, { colorSpace });
+}
+
 export function cloneCanvas(src: HTMLCanvasElement): HTMLCanvasElement {
-  const c = createCanvas(src.width, src.height);
+  const c = createCanvas(src.width, src.height, spaceOf(src));
+  ctx2d(c).drawImage(src, 0, 0);
+  return c;
+}
+
+// Display P3 → linear sRGB (D65)
+const P3_TO_SRGB = [1.2249401, -0.2249404, 0, -0.0420569, 1.0420571, 0, -0.0196376, -0.0786361, 1.0982735];
+const toLinear = (() => {
+  const t = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const v = i / 255;
+    t[i] = v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  return t;
+})();
+
+/**
+ * Whether a Display P3 canvas holds colours sRGB can't show (checked on a copy at most 512 px across).
+ * A few stray pixels don't count: at least 0.05 % of them must be clearly outside.
+ */
+export function hasWideGamut(c: HTMLCanvasElement): boolean {
+  const k = Math.min(1, 512 / Math.max(c.width, c.height));
+  const w = Math.max(1, Math.round(c.width * k));
+  const h = Math.max(1, Math.round(c.height * k));
+  const probe = createCanvas(w, h, 'display-p3');
+  const g = ctx2d(probe);
+  g.drawImage(c, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  const m = P3_TO_SRGB;
+  let out = 0;
+  let seen = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 128) continue;
+    seen++;
+    const r = toLinear[d[i]];
+    const gg = toLinear[d[i + 1]];
+    const b = toLinear[d[i + 2]];
+    for (let row = 0; row < 3; row++) {
+      const v = m[row * 3] * r + m[row * 3 + 1] * gg + m[row * 3 + 2] * b;
+      if (v < -0.02 || v > 1.02) {
+        out++;
+        break;
+      }
+    }
+  }
+  return seen > 0 && out >= Math.max(4, seen * 0.0005);
+}
+
+/** The canvas redrawn in another space (the browser converts the colours); itself when already there. */
+export function convertCanvas(src: HTMLCanvasElement, space: ColorSpaceId): HTMLCanvasElement {
+  if (spaceOf(src) === space) return src;
+  const c = createCanvas(src.width, src.height, space);
   ctx2d(c).drawImage(src, 0, 0);
   return c;
 }
@@ -42,13 +127,16 @@ const scratchPool = new Map<string, HTMLCanvasElement>();
 /** Frees a scratch canvas that is no longer needed (big previews shouldn't stay in memory). */
 export function releaseScratch(key: string) {
   scratchPool.delete(key);
+  scratchPool.delete(`${key}@display-p3`);
 }
 
 export function scratch(key: string, width: number, height: number): HTMLCanvasElement {
-  let c = scratchPool.get(key);
+  // One per space: a scratch made for an sRGB document can't hold P3 pixels unconverted
+  const k = working === 'srgb' ? key : `${key}@${working}`;
+  let c = scratchPool.get(k);
   if (!c) {
     c = createCanvas(width, height);
-    scratchPool.set(key, c);
+    scratchPool.set(k, c);
   }
   if (c.width !== width || c.height !== height) {
     c.width = Math.max(1, width);
@@ -162,19 +250,24 @@ function boxH(src: Float32Array, dst: Float32Array, w: number, h: number, r: num
   }
 }
 
+// Row by row with one running sum per column: walking down columns of a wide image misses the CPU cache on
+// nearly every read (a 40 MP blur took ~40 s that way)
 function boxV(src: Float32Array, dst: Float32Array, w: number, h: number, r: number) {
   const inv = 1 / (r * 2 + 1);
-  for (let x = 0; x < w; x++) {
-    const first = src[x];
-    const last = src[(h - 1) * w + x];
-    let acc = first * (r + 1);
-    for (let i = 0; i < r; i++) acc += src[Math.min(i, h - 1) * w + x];
-    for (let y = 0; y < h; y++) {
-      const addIdx = y + r;
-      const subIdx = y - r - 1;
-      acc += addIdx < h ? src[addIdx * w + x] : last;
-      acc -= subIdx >= 0 ? src[subIdx * w + x] : first;
-      dst[y * w + x] = acc * inv;
+  const acc = new Float64Array(w);
+  const lastRow = (h - 1) * w;
+  for (let x = 0; x < w; x++) acc[x] = src[x] * (r + 1);
+  for (let i = 0; i < r; i++) {
+    const row = Math.min(i, h - 1) * w;
+    for (let x = 0; x < w; x++) acc[x] += src[row + x];
+  }
+  for (let y = 0; y < h; y++) {
+    const add = y + r < h ? (y + r) * w : lastRow;
+    const sub = y - r - 1 >= 0 ? (y - r - 1) * w : 0;
+    const out = y * w;
+    for (let x = 0; x < w; x++) {
+      acc[x] += src[add + x] - src[sub + x];
+      dst[out + x] = acc[x] * inv;
     }
   }
 }

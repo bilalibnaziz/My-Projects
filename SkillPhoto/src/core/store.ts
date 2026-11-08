@@ -1,13 +1,15 @@
 import { useSyncExternalStore } from 'react';
 import type { Doc, Layer, Rect, Selection, Snapshot } from './types';
 import { makeLayer, uid, withLayer } from './types';
-import { cloneCanvas, createCanvas, ctx2d, touch } from './canvas';
+import { cloneCanvas, createCanvas, ctx2d, setWorkingSpace, touch } from './canvas';
+import { packHistory, packedBytes, rawLayers } from './historyPack';
 import type { Overrides } from './render';
 import { DocRenderer } from './render';
 import type { DocGridPrefs } from './grids';
 import { loadDocGrid, saveDocGrid } from './grids';
 import { bakeGroupOffsets, normalize } from './groups';
 import { applyHugs } from './hug';
+import { syncHighBit } from './hibit';
 
 export type ToolId =
   | 'move'
@@ -17,6 +19,7 @@ export type ToolId =
   | 'poly-lasso'
   | 'wand'
   | 'crop'
+  | 'perspective-crop'
   | 'eyedropper'
   | 'brush'
   | 'pencil'
@@ -166,6 +169,7 @@ export type DialogState =
   | { type: 'batchExport' }
   | { type: 'imageSize' }
   | { type: 'canvasSize' }
+  | { type: 'contentAwareScale' }
   | { type: 'filter'; filterId: string; smartIndex?: number; params?: Record<string, number> }
   | { type: 'number'; title: string; label: string; value: number; min: number; max: number; unit?: string; onOk: (v: number) => void }
   | { type: 'shortcuts' }
@@ -175,6 +179,7 @@ export type DialogState =
   | { type: 'colorPicker'; target: 'fg' | 'bg' }
   | { type: 'batch'; actionId: string }
   | { type: 'liquify' }
+  | { type: 'skyReplace' }
   | { type: 'selectMask' }
   | { type: 'transformEach' }
   | { type: 'recolor'; ids: string[] }
@@ -208,6 +213,8 @@ export interface CropState {
   rect: Rect;
   /** Still the untouched full-canvas box: a drag inside draws a new crop instead of moving it. */
   pristine?: boolean;
+  /** Perspective Crop: free corners (doc space, nw ne se sw); `rect` is then their bounds. */
+  quad?: { x: number; y: number }[];
 }
 
 export interface TransformState {
@@ -284,7 +291,8 @@ export function historyBytes(history: Snapshot[]): number {
     bytes += c.width * c.height * 4;
   };
   for (const h of history) {
-    for (const l of h.layers) {
+    bytes += packedBytes(h); // Tile deltas (historyPack.ts); read raw so nothing is rebuilt
+    for (const l of rawLayers(h)) {
       add(l.canvas);
       add(l.mask?.canvas);
     }
@@ -360,6 +368,8 @@ class Store {
 
   /** State changed: re-render React and the canvas. */
   emit() {
+    // New canvases are made in the active document's colour space
+    setWorkingSpace(this.doc?.colorSpace ?? 'srgb');
     this.version++;
     this.listeners.forEach((l) => l());
     this.requestRender();
@@ -395,7 +405,7 @@ class Store {
     return d ? d.layers.find((l) => l.id === d.activeId) ?? null : null;
   }
 
-  addDoc(init: { title: string; width: number; height: number; layers: Layer[]; sourceName?: string; safeZone?: string }): Doc {
+  addDoc(init: { title: string; width: number; height: number; layers: Layer[]; sourceName?: string; safeZone?: string; colorSpace?: Doc['colorSpace'] }): Doc {
     const top = init.layers[init.layers.length - 1];
     const doc: Doc = {
       id: uid('doc'),
@@ -413,6 +423,7 @@ class Store {
       view: { zoom: 1, panX: 0, panY: 0, fitted: false },
       sourceName: init.sourceName,
       safeZone: init.safeZone,
+      colorSpace: init.colorSpace === 'display-p3' ? 'display-p3' : undefined,
     };
     doc.history.push(this.snapshot(doc, init.sourceName ? 'Open' : 'New Document', 'file'));
     doc.hIndex = 0;
@@ -436,6 +447,7 @@ class Store {
   switchDoc(id: string) {
     this.cancelModes();
     this.state.activeDocId = id;
+    setWorkingSpace(this.doc?.colorSpace ?? 'srgb');
     this.invalidateRender();
     this.emit();
     import('./tools').then((m) => m.resetGestures?.()).catch(() => {});
@@ -520,6 +532,9 @@ class Store {
       height: doc.height,
       selection: doc.selection,
       grids: doc.grids,
+      colorSpace: doc.colorSpace,
+      colorMode: doc.colorMode,
+      depth: doc.depth,
       time: Date.now(),
     };
   }
@@ -528,9 +543,11 @@ class Store {
    * Applies a change and records it as one undoable step. When `coalesce` matches the
    * previous step (e.g. dragging a slider), that step is replaced instead of appended.
    */
+  private hibitHinted = false;
+
   commit(
     label: string,
-    patch: Partial<Pick<Doc, 'layers' | 'activeId' | 'width' | 'height' | 'selection'>> = {},
+    patch: Partial<Pick<Doc, 'layers' | 'activeId' | 'width' | 'height' | 'selection' | 'depth'>> = {},
     opts: { icon?: string; coalesce?: string } = {}
   ) {
     const doc = this.doc;
@@ -544,6 +561,15 @@ class Store {
     doc.layers = bakeGroupOffsets(normalize(doc.layers));
     // Buttons: shapes that hug their label stay fitted (hug.ts)
     doc.layers = applyHugs(doc.history[doc.hIndex]?.layers, doc.layers);
+    // 16 / 32 bits: the layer buffers are the pixels; fold any edit of the 8-bit previews into them (hibit.ts)
+    if ((doc.depth ?? 8) > 8) {
+      const hb = syncHighBit(doc);
+      doc.layers = hb.layers;
+      if (hb.merged && !this.hibitHinted) {
+        this.hibitHinted = true;
+        this.toast(`${label}: merged into the ${doc.depth}-bit layer (exact to one 8-bit level where it changed pixels; the rest keeps full precision)`);
+      }
+    }
     // A new active layer (new, pasted, merged…) collapses a multi-selection unless it is still valid
     if (doc.selectedIds) {
       const ids = doc.selectedIds.filter((id) => doc.layers.some((l) => l.id === id));
@@ -567,12 +593,41 @@ class Store {
       doc.history.push(snap);
       const limit = this.state.prefs.historyLimit ?? HISTORY_LIMIT;
       if (doc.history.length > limit) doc.history.splice(1, doc.history.length - limit);
-      const maxBytes = (this.state.prefs.maxHistoryMb ?? 256) * 1024 * 1024;
-      while (doc.history.length > 2 && historyBytes(doc.history) > maxBytes) doc.history.splice(1, 1);
       doc.hIndex = doc.history.length - 1;
+      this.scheduleHistoryUpkeep(doc);
     }
     doc.dirty = true;
     this.emit();
+  }
+
+  private upkeepTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Packs older steps into tiles and trims history to its memory cap, a moment after a commit instead of
+   * inside it (comparing two 40 MP layers took most of a second after every stroke). At most every
+   * 250 ms while committing quickly, so memory can't run away during fast painting.
+   */
+  private scheduleHistoryUpkeep(doc: Doc) {
+    if (this.upkeepTimer) return;
+    this.upkeepTimer = setTimeout(() => {
+      this.upkeepTimer = null;
+      this.historyUpkeep(doc);
+    }, 250);
+  }
+
+  /** Runs the pending history upkeep now (tests, memory readouts). */
+  historyUpkeep(doc: Doc | null = this.doc) {
+    if (!doc) return;
+    // Older steps keep only the tiles that differ from the step after them (the current step and the
+    // one before it stay whole: instant undo, and nothing points at pixels still being edited)
+    const keep = new Set<Snapshot>(this.state.historySource ? [this.state.historySource] : []);
+    packHistory(doc.history, keep, Math.min(doc.history.length - 2, doc.hIndex - 1));
+    const maxBytes = (this.state.prefs.maxHistoryMb ?? 256) * 1024 * 1024;
+    // Oldest steps go first; never the step on screen
+    while (doc.history.length > 2 && doc.hIndex > 1 && historyBytes(doc.history) > maxBytes) {
+      doc.history.splice(1, 1);
+      doc.hIndex--;
+    }
   }
 
   /** Updates doc state without creating a history step (live previews). */
@@ -604,6 +659,10 @@ class Store {
     doc.height = s.height;
     doc.selection = s.selection;
     if ('grids' in s) doc.grids = s.grids;
+    doc.colorSpace = s.colorSpace;
+    setWorkingSpace(doc.colorSpace ?? 'srgb');
+    doc.colorMode = s.colorMode;
+    doc.depth = s.depth;
     if (!keepSel) doc.selectedIds = undefined;
     doc.hIndex = index;
     doc.dirty = index > 0;

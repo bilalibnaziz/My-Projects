@@ -183,12 +183,13 @@ function presetPreview(id: string): string {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText('Aa', w / 2, h / 2 + 1);
-  const r = computeFx(ctx.getImageData(0, 0, w, h).data, w, h, fx, p.fill ?? 1);
+  const src = ctx.getImageData(0, 0, w, h);
+  const r = computeFx(src.data, w, h, fx, p.fill ?? 1);
   const out = createCanvas(r.width, r.height);
   const octx = ctx2d(out);
-  octx.putImageData(new ImageData(r.behind as Uint8ClampedArray<ArrayBuffer>, r.width, r.height), 0, 0);
+  octx.putImageData(new ImageData(r.behind as Uint8ClampedArray<ArrayBuffer>, r.width, r.height, { colorSpace: src.colorSpace }), 0, 0);
   const front = createCanvas(r.width, r.height);
-  ctx2d(front).putImageData(new ImageData(r.front as Uint8ClampedArray<ArrayBuffer>, r.width, r.height), 0, 0);
+  ctx2d(front).putImageData(new ImageData(r.front as Uint8ClampedArray<ArrayBuffer>, r.width, r.height, { colorSpace: src.colorSpace }), 0, 0);
   octx.drawImage(front, 0, 0);
   const url = out.toDataURL();
   previewCache.set(id, url);

@@ -32,11 +32,13 @@ const TO_PSD: Partial<Record<BlendMode, PsdBlend>> = {
 };
 
 export function blendToPsd(b: BlendMode): PsdBlend {
+  if (b === 'pass-through') return 'pass through';
   return TO_PSD[b] ?? (b as PsdBlend);
 }
 
 export function blendFromPsd(b: PsdBlend | undefined): BlendMode {
-  if (!b || b === 'pass through' || b === 'linear height' || b === 'height') return 'normal';
+  if (b === 'pass through') return 'pass-through';
+  if (!b || b === 'linear height' || b === 'height') return 'normal';
   if (b === 'subtraction') return 'subtract';
   const hit = (Object.keys(TO_PSD) as BlendMode[]).find((k) => TO_PSD[k] === b);
   return hit ?? (b as BlendMode);

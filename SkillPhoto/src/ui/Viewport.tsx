@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
+import { compositeHighBit, fromFloat, highBitCompositeBlocker } from '../core/hibit';
 import { uiZoom } from './theme';
 import type { Doc, Selection } from '../core/types';
 import { store, useStore } from '../core/store';
-import { ctx2d } from '../core/canvas';
+import { createCanvas, ctx2d, setCanvasSpace } from '../core/canvas';
 import { outlinePath } from '../core/selection';
 import { shapePath, fontString } from '../core/render';
 import { styleAt } from '../core/text';
 import { meshPoint } from '../core/transform';
+import { apply3, squareToQuad } from '../core/warp';
+import { validCropQuad } from '../core/perspectiveCrop';
 import { POST_DRAG_TYPE, dropPostItem } from './SocialPanel';
 import { shapeWidgets } from '../core/shapeWidgets';
 import { frameCorners, frameHandles, frameVisible, layerFrame, selectionFrame, transformTargets } from '../core/objectTransform';
@@ -77,6 +80,13 @@ export function Viewport() {
   const doc = store.doc;
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // The screen canvas works in the document's colour space (a P3 photo shows its full range on a P3
+  // display); a new element is made when that changes, since a context's space is fixed
+  const screenSpace = doc?.colorSpace ?? 'srgb';
+  const attachCanvas = (el: HTMLCanvasElement | null) => {
+    if (el) setCanvasSpace(el, screenSpace);
+    canvasRef.current = el;
+  };
   const [size, setSize] = useState({ w: 800, h: 600 });
   const sizeRef = useRef(size);
   sizeRef.current = size;
@@ -220,6 +230,7 @@ export function Viewport() {
       ctx.restore();
     } else {
       let out = store.renderer.render(renderDoc, store.overrides);
+      out = highBitShown(out, renderDoc, store.renderer.signature, !!store.overrides.size);
       if (st.proof !== 'off') out = proofed(out, store.renderer.signature, st.proof);
       ctx.save();
       ctx.imageSmoothingEnabled = zoom < 2;
@@ -476,8 +487,52 @@ export function Viewport() {
       });
     }
 
-    // Crop overlay
-    if (st.crop) {
+    // Perspective crop overlay: shade outside the quad, a perspective grid inside, corner + edge handles
+    if (st.crop?.quad) {
+      const q = st.crop.quad;
+      const ok = validCropQuad(q);
+      ctx.save();
+      ctx.fillStyle = 'rgba(10,10,14,0.62)';
+      ctx.beginPath();
+      ctx.rect(-1e5, -1e5, 2e5, 2e5);
+      ctx.moveTo(q[0].x, q[0].y);
+      for (let i = 1; i < 4; i++) ctx.lineTo(q[i].x, q[i].y);
+      ctx.closePath();
+      ctx.fill('evenodd');
+      if (ok) {
+        const m = squareToQuad(q);
+        ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+        ctx.lineWidth = px;
+        ctx.beginPath();
+        for (let i = 1; i < 4; i++) {
+          const t = i / 4;
+          const a = apply3(m, t, 0), b = apply3(m, t, 1), c = apply3(m, 0, t), d = apply3(m, 1, t);
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.moveTo(c.x, c.y);
+          ctx.lineTo(d.x, d.y);
+        }
+        ctx.stroke();
+      }
+      ctx.strokeStyle = ok ? '#fff' : '#ff5a5a';
+      ctx.lineWidth = 1.5 * px;
+      ctx.beginPath();
+      ctx.moveTo(q[0].x, q[0].y);
+      for (let i = 1; i < 4; i++) ctx.lineTo(q[i].x, q[i].y);
+      ctx.closePath();
+      ctx.stroke();
+      const hs = 5 * px;
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#1e1e1e';
+      ctx.lineWidth = px;
+      const handles = [...q, ...q.map((p, i) => ({ x: (p.x + q[(i + 1) % 4].x) / 2, y: (p.y + q[(i + 1) % 4].y) / 2 }))];
+      handles.forEach((p, i) => {
+        const s2 = i < 4 ? hs : hs * 0.75;
+        ctx.fillRect(p.x - s2, p.y - s2, s2 * 2, s2 * 2);
+        ctx.strokeRect(p.x - s2, p.y - s2, s2 * 2, s2 * 2);
+      });
+      ctx.restore();
+    } else if (st.crop) {
       const r = st.crop.rect;
       ctx.save();
       ctx.fillStyle = 'rgba(10,10,14,0.62)';
@@ -908,6 +963,9 @@ export function Viewport() {
       c = tools.objectCursor({ x, y }, store.doc!.view.zoom) ?? tools.cursorFor(st.tool);
     } else if (st.tool === 'shape' && tools.widgetHover({ x, y }, store.doc!.view.zoom)) {
       c = 'pointer';
+    } else if (st.tool === 'perspective-crop' && st.crop?.quad) {
+      const hit = tools.perspectiveHit(st.crop.quad, { x, y }, store.doc!.view.zoom);
+      c = hit === 'move' ? (st.crop.pristine ? 'crosshair' : 'move') : hit === 'new' ? 'crosshair' : 'pointer';
     } else if (st.tool === 'crop' && st.crop) {
       const r = st.crop.rect;
       const tol = 9 / store.doc!.view.zoom;
@@ -947,7 +1005,7 @@ export function Viewport() {
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, []);
+  }, [screenSpace]);
 
   // Space-bar temporary hand tool
   useEffect(() => {
@@ -986,7 +1044,8 @@ export function Viewport() {
 
   useEffect(() => {
     setCursor(tools.isBrushTool(s.tool) || s.tool === 'quick-select' ? 'none' : tools.cursorFor(s.tool));
-    if (s.tool === 'crop' && !s.crop && store.doc) tools.startCrop();
+    if (s.tool === 'crop' && (!s.crop || s.crop.quad) && store.doc) tools.startCrop();
+    if (s.tool === 'perspective-crop' && !s.crop?.quad && store.doc) tools.startPerspectiveCrop();
   }, [s.tool, s.activeDocId]);
 
   return (
@@ -1038,7 +1097,8 @@ export function Viewport() {
       }}
     >
       <canvas
-        ref={canvasRef}
+        key={screenSpace}
+        ref={attachCanvas}
         className="viewport-canvas"
         style={{ width: size.w, height: size.h, cursor }}
         onPointerDown={onPointerDown}
@@ -1222,6 +1282,37 @@ function drawSafeZone(ctx: CanvasRenderingContext2D, z: (typeof SAFE_ZONES)[stri
 
 // Soft-proof display copy, redone only when the document pixels or the proof mode change
 let proofCache: { key: string; canvas: HTMLCanvasElement } | null = null;
+/**
+ * 16 / 32-bit documents with adjustment layers: show the float composite (dithered once, at the end) instead of
+ * adjusting the 8-bit previews, which would band. Computed once the edit settles (live drags keep the fast 8-bit
+ * path); until then the 8-bit result shows.
+ */
+let hibitCache: { key: string; canvas: HTMLCanvasElement } | null = null;
+let hibitTimer = 0;
+let hibitPending = '';
+function highBitShown(out: HTMLCanvasElement, doc: Doc, sig: string, live: boolean): HTMLCanvasElement {
+  if ((doc.depth ?? 8) <= 8 || live || !sig) return out;
+  if (!doc.layers.some((l) => l.visible && l.kind === 'adjustment') || highBitCompositeBlocker(doc)) return out;
+  const key = `${doc.id}|${sig}`;
+  if (hibitCache?.key === key) return hibitCache.canvas;
+  if (hibitPending !== key) {
+    hibitPending = key;
+    clearTimeout(hibitTimer);
+    hibitTimer = window.setTimeout(() => {
+      const d = store.doc;
+      if (!d || hibitPending !== key) return;
+      const f = compositeHighBit(d);
+      if (!f) return;
+      const pb = fromFloat(f, d.width, d.height, 16);
+      const c = createCanvas(d.width, d.height, d.colorSpace ?? 'srgb');
+      ctx2d(c).putImageData(pb.toImageData(true, d.colorSpace ?? 'srgb'), 0, 0);
+      hibitCache = { key, canvas: c };
+      store.requestRender();
+    }, 160);
+  }
+  return out;
+}
+
 function proofed(src: HTMLCanvasElement, sig: string, mode: 'cmyk' | 'gamut'): HTMLCanvasElement {
   const key = `${mode}|${src.width}x${src.height}|${sig}`;
   if (proofCache?.key === key && sig) return proofCache.canvas;

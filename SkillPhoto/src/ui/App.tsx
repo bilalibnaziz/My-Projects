@@ -6,6 +6,8 @@ import { store, useStore } from '../core/store';
 import { handleKey } from '../core/commands';
 import * as io from '../core/io';
 import * as ops from '../core/ops';
+import { AiAssistant } from '../ai/AiAssistant';
+import { photoAdapter } from '../ai/appAdapter';
 import { MenuBar, DocTabs, StatusBar, Toasts, CommandPalette } from './Chrome';
 import { ActiveToolbox } from './ActiveToolbox';
 import { SocialPanel } from './SocialPanel';
@@ -563,6 +565,7 @@ export default function App() {
       <Dialogs />
       <CommandPalette />
       <Toasts />
+      <AiAssistant adapter={photoAdapter} />
       {dragging && (
         <div className="drop-overlay">
           <ImagePlus size={28} />

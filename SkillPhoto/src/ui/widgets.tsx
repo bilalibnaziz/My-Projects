@@ -187,7 +187,7 @@ export function Toggle({ checked, onChange, label, title }: { checked: boolean; 
 export function ColorInput({ value, onChange, title }: { value: string; onChange: (v: string) => void; title?: string }) {
   return (
     <label className="color-input" title={title} style={{ background: value }}>
-      <input type="color" value={value.length === 7 ? value : '#000000'} onChange={(e) => onChange(e.target.value)} />
+      <input type="color" aria-label={title ?? 'Colour'} value={value.length === 7 ? value : '#000000'} onChange={(e) => onChange(e.target.value)} />
     </label>
   );
 }

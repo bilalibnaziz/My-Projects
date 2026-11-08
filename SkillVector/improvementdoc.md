@@ -8,6 +8,312 @@ Status checked on 2026-10-12: 128/128 unit tests pass. The app is a fork of the 
 the Photoscale snapshot `6bac5fd`.
 
 
+## Review — 2026-11-08: Batch 3, PDF / .ai import, step 4: shadings, patterns, soft masks (B3.4) — Rating: 9.5/10
+
+- **Shadings** (`formats/pdfImport.ts`, `shadingToSvgGradient`): PDF axial (linear) and radial shadings (`OPS.shadingFill` and `OPS.setFillColorN` with Shading) are resolved via `page.objs.get(id)` and translated to SVG `<linearGradient>` and `<radialGradient>` definitions under `gradientUnits="userSpaceOnUse"`. Coords are mapped through pattern matrices and page base transform into document space, with stops preserving colors and alphas. When drawn, they become editable vector shape layers with first-class `ShapeGradient` fills.
+- **Tiling Patterns** (`formats/pdfImport.ts`, `renderTilingPattern`): PDF tiling patterns (`OPS.setFillColorN` with TilingPattern) have their tile operator lists evaluated into `PatternArt` and converted to `PatternFill` (using `artFill`), preserving tile dimensions, matrix and color, attached to the shape's `shape.pattern`. `drawLayerVector` in `render.ts` was expanded to draw raster/art tile layers directly.
+- **Soft Masks** (`formats/pdfImport.ts`, `renderSoftMask`): ExtGState `/SMask` transparency groups (`OPS.beginGroup` with `group.smask` ... `OPS.endGroup`) are rendered into dedicated mask canvases and converted (Rec. 709 luminosity `0.2126 R + 0.7152 G + 0.0722 B` to alpha). When activated via `OPS.setGState([['SMask', true]])`, the mask is attached directly to layers as `layer.mask` (`Mask` interface). `render.ts` `maskedSurface` renders them using `destination-in` compositing, matching pdf.js.
+- **Fix to B3.2/B3.3 Image Placement**: Corrected double-application of `base` transform in `imagePlacement`, ensuring axis-aligned and rotated images land on exact document coordinates.
+- **Verification Results**:
+  - `npx tsc -b`: 0 errors.
+  - `npm run lint`: 0 errors (43 warnings).
+  - `npm test`: **490/490 passed** across 50 test files (+6 new tests in `pdfImport.test.ts` covering `shadingToSvgGradient`, `renderTilingPattern`, `renderSoftMask`).
+  - `node e2e/run.mjs pdfimport`: **12/12 passed** (mean pixel differences: shapes 0.04, clips 0.18, images 2.11, blend 0, shadings 0.02, soft masks 0; all < 3.0 budget).
+  - `npm run build`: Succeeded in 1.66s.
+- **Rating Upgraded**: **9.0/10 → 9.5/10**.
+- **Still Open**: Coated-model pickers, raster overprint, and X-1a transparency flattening.
+
+## Review — 2026-11-08: Batch 3, PDF / .ai import, step 3: blend modes (B3.3)
+
+- Blend modes (`formats/pdfImport.ts`, `pdfBlendMode`): a PDF ExtGState `/BM` is read from
+  `setGState` and kept in the graphics state (saved / restored with `q` / `Q`, like the fill
+  colour and alpha), then applied to every layer painted under it — paths (`withLayer(l,
+  { blend })`), text (the blend rides with the fill through `matchTextFill`, so a blended line
+  keeps its blend) and images (`makeLayer({ blend })`). pdf.js 4.10.38 normalises the PDF name
+  to a canvas composite name before it reaches the operator list (`normalizeBlendMode` in
+  `pdf.worker.mjs`, verified in the pinned build: Normal / Compatible → `source-over`,
+  Multiply → `multiply`, … Luminosity → `luminosity`; an array takes its first supported
+  entry, an unknown name falls back to `source-over` with a warning), and all 16 map 1:1 onto
+  the app's `BlendMode`. The raw PDF names are accepted too, in case a later pdf.js stops
+  normalising; a value the app cannot map is counted in `skipped['blend mode']` (in practice
+  unreachable — pdf.js falls back to Normal first). No new renderer code: the layer's own blend
+  is already first-class (`render.ts` `drawBlended`, canvas `globalCompositeOperation` / the
+  custom blend engine), so the imported layer renders exactly as pdf.js does.
+- Approximation, stated plainly: a PDF blend mode blends inside its transparency group; the
+  imported layer blends over everything below it on the page. For the common case — one blended
+  element over the artwork beneath it — that is identical; nested transparency groups may differ.
+- Tests (written, NOT run here — this Mac has no shell, so no `tsc`, `npm test` or build was run;
+  verification is Bilal's PC step: `npm test`, `npx tsc -b`, `npm run lint`, `node e2e/pdfimport.e2e.mjs`
+  or `npm run test:e2e`): `src/test/pdfImport.test.ts` (now 18 cases: + `pdfBlendMode` — all 16
+  pdf.js names, raw PDF names, array first-supported, unknown → null; + the blend rides along in
+  `matchTextFill`); `e2e/pdfimport.e2e.mjs` (now 10 checks): 7th fixture — a cyan panel with a
+  yellow panel over it under `/Multiply`, checked for the top layer's blend `multiply`, the
+  bottom layer's `normal`, and a mean pixel difference < 3 against pdf.js's own render (green
+  overlap).
+- Still open in PDF import: shadings, patterns, soft masks; vertical text; image masks and
+  repeated images (counted in the toast); stroked-only text (comes in as a fill); Type3 fonts
+  (custom glyph shapes are not converted to outlines). Regression numbers from B3.1 (unit 466/466,
+  e2e suites) are NOT
+  re-claimed here — nothing was run.
+
+## Review — 2026-11-08: Batch 3, PDF / .ai import, step 2: text + images (B3.2)
+
+- Text (`formats/pdfImport.ts`): each page's `getTextContent()` becomes one editable text layer per
+  line, with its real size, rotation and advance width, placed so its baseline lands where the PDF's
+  is (the renderer's own convention: baseline 0.9 × size below the layer top, 1.2 × size tall;
+  rotated text is boxed about the rotated line's centre, `Layer.rotation`). The fill colour comes
+  from the operator list — `setFillRGBColor` / `setFillGray` / `setFillCMYKColor` (CMYK through the
+  coated FOGRA39 preview model) live at each `showText` / `showSpacedText` / `nextLine…` operator —
+  matched to each line by its string (`matchTextFill`, prefix-tolerant for pdf.js splitting or
+  merging lines differently from the operator list; no match keeps the previous line's colour,
+  black when there is none). Font names lose their 6-letter subset tag, map through the base-14
+  table (Helvetica, Times New Roman, Courier New…), and read Bold / Italic from the name;
+  `getTextContent()`'s resolved family wins when pdf.js has one.
+- Images: `paintImageXObject` (pixels from `page.objs`, callback form with a 5 s timeout) and inline
+  images (the data rides the operator arg) become raster layers with their own pixels, placed by the
+  CTM that painted them (`imagePlacement`: the unit square's bounding box, canvas transform flips
+  the top row upright, so rotated images land correctly). Image data is decoded the way pdf.js
+  itself does: ImageBitmap, ImageData, or raw 1-bit grayscale (1 = white, MSB first), RGB and RGBA.
+  Paths, text and images are merged into one z-ordered stream per page by operator index, so text
+  under a shape stays under it, and text / images painted inside a clip are clipped like paths.
+- Open summary and toast (`io.ts`) now count text layers and images alongside paths and clips.
+- Tests (written, NOT run here — this Mac has no shell, so no `tsc`, `npm test` or build was run;
+  verification is Bilal's PC step: `npm test`, `npx tsc -b`, `npm run lint`, `node e2e/pdfimport.e2e.mjs`
+  or `npm run test:e2e`): `src/test/pdfImport.test.ts` (13 cases: font-name mapping, `placeText`
+  horizontal + rotated, `imagePlacement` axis-aligned + rotated, `glyphsStr`, `matchTextFill` exact /
+  merged / split / no-match); `e2e/pdfimport.e2e.mjs` (now 9 checks): the fixture writer gained a
+  Helvetica /F1 font on every page and image XObjects, plus a 6th fixture — two colours and sizes
+  of text, one line rotated 90°, over a grey panel, with a 2 × 2 RGB image placed 100 × 50 — checked
+  for string / size / colour / rotation per line, image position, and a mean pixel difference < 3
+  against pdf.js's own render.
+- Still open in PDF import: shadings, patterns, soft masks, blend modes; vertical text; image masks
+  and repeated images (counted in the toast); stroked-only text (comes in as a fill); Type3 fonts
+  (custom glyph shapes are not converted to outlines). Regression numbers from B3.1 (unit 466/466,
+  e2e suites) are NOT
+  re-claimed here — nothing was run.
+
+## Review — 2026-11-08: Batch 3, PDF / .ai import, step 1: paths (B3.1)
+
+- File ▸ Open accepts `.pdf` and PDF-compatible `.ai` (`formats/pdfImport.ts`, pdf.js 4.10.38, Apache-2.0, pinned). Each
+  page's operator list is walked (save / restore, cm, path ops incl. the `v` / `y` curve forms, fill / stroke / both,
+  even-odd, line width / caps / joins / miter / dash, RGB fill / stroke, ExtGState alpha) and written as SVG for the
+  existing SVG importer, so paths land as editable shape layers. Filling closes open subpaths (an open path that is
+  also stroked becomes a closed fill + the open stroke). One artboard per page, side by side, with white paper.
+- Clipping paths become Illustrator-style clip groups: new `Layer.clipPathOnly` ("Clipping Path" base that clips but
+  isn't drawn; `render.ts` composites the clipped layers on their own layer). Page-sized rectangular clips are ignored.
+- Not yet (counted in the open summary toast): text, images, shadings, patterns, soft masks, blend modes; nested
+  clips use the innermost one.
+- Tests: `e2e/pdfimport.e2e.mjs` (7): five PDFs written by the test (shapes + curves + even-odd + dash; nested
+  transforms; elliptical clip + page clip + opacity; two pages; a round-trip of our own PDF export), each page within a
+  mean pixel difference of 0.00–0.18 of pdf.js's own render; editable anchors; the clip group is built.
+- Regression: unit 466/466; cmykpdf 11/11 (flaked once, passed on rerun), pdfbleed 12/12, separations 9/9, pdfx4 7/7,
+  envelope 6/6, formats 7/7, cmdsweep, audit-tools 34/34, toolsweep; lint 0 errors; build ok (worker bundled).
+
+## Review — 2026-11-07: Batch 2, print output (B2.1–B2.4)
+
+- **Bleed + printer's marks** (B2.1). File ▸ Document Setup (⌥⌘P): bleed per side in mm (3 mm default, linked or
+  per side), stored on the document in px (`Doc.bleed`), one undo step, saved in projects, drawn as a red line around
+  every artboard. PDF export (`vectorPdf.ts` `pageBoxes`): TrimBox = artboard, BleedBox = trim + bleed, MediaBox =
+  bleed + 24 pt when marks are on; content is clipped to the bleed, so artwork past the trim edge is kept up to it.
+  Marks: crop (8 strokes outside the bleed), registration targets (in the `/All` Separation, so on every plate),
+  colour bars (C/M/Y/K at 100/50/25 % + spots, CMYK documents), page info (Helvetica; it blocks the PDF/X claim with
+  the reason, since that font isn't embedded). Options in the Export dialog (PDF), remembered in `skillvector.pdfPrint`.
+  Tests: `e2e/pdfbleed.e2e.mjs` (12): real dialog, red guide pixels, undo + project save, exact box values for 3 mm,
+  marks only when asked, Quartz render (artwork fills the bleed, nothing beyond), media + boxes with marks, /All
+  plate, colour bars, page-info → no X claim, bleed off.
+- **Overprint** (B2.2). Layer `overprintFill` / `overprintStroke` (Window ▸ Attributes, in the Separations tab),
+  one undo step; written as ExtGState `/op` / `/OP` with `/OPM 1`. View ▸ Overprint Preview (⌥⇧⌘O) shows the inks
+  as printed. Engine: `core/separations.ts` (each visible layer rendered alone, mapped to its exact inks through
+  `PrintColors`, composited per plate: knockout replaces by coverage, overprint only where the layer has ink).
+  Tests: `separations.test.ts` (5, `mixInk`: Y over C → C+Y, knockout → Y only, OPM 1, 50 % edge, black text over
+  a panel); e2e below.
+- **Separations Preview** (B2.3). Window ▸ Separations Preview: C, M, Y, K and each spot plate with eye toggles,
+  click a name to see that plate alone in grayscale, ink % under the cursor and total ink coverage with a limit
+  warning (default 300 %, `skillvector.inkLimit`). Closing the tab returns the normal canvas.
+  Tests: `e2e/separations.e2e.mjs` (9): Attributes toggle + undo, PDF ExtGState used once on the right object,
+  preview pixels (overprint green vs knockout yellow), hide Cyan → paper, solo Yellow → grayscale, readout
+  50/40/30/20 = 140 %, overlap 200 %, normal view restored, no console errors.
+- **ICC engine + PDF/X-4** (B2.4). `core/icc.ts` (shared module, dependency-free): header + tags, `curv` / `para`
+  curves, matrix/TRC RGB and gray, `mft1` / `mft2` / `mAB ` LUTs with n-linear CLUT interpolation, Lab/XYZ PCS,
+  D50 sRGB, CIEDE2000, embedded profiles in JPEG (APP2) and PNG (iCCP). Measured against Apple ColorSync (sips)
+  with the system profiles: Generic CMYK max ΔE00 1.52 (mean 0.57), Adobe RGB 0.32, Display P3 0.14
+  (`icc.test.ts`, 7, incl. published CIEDE2000 pairs). File ▸ Output Profile ▸ Load CMYK Profile (.icc): RGB
+  profiles refused; kept with the document (undoable, saved in projects). With it, PDF export is **PDF/X-4**:
+  PDF 1.6, OutputIntent with the profile embedded as DestOutputProfile, XMP metadata (`pdfxid:GTS_PDFXVersion`),
+  live transparency allowed; without one, PDF/X-1a as before. Overprint / Separations Preview convert inks
+  through the loaded profile. Tests: `e2e/pdfx4.e2e.mjs` (7): X-1a still refuses transparency, RGB profile
+  refused, X-4 + transparency, profile bytes identical, XMP + xref, Quartz renders it, preview pixels = the
+  profile's conversion (not the built-in model).
+- Regression: unit 466/466; e2e cmykpdf 11/11, envelope 6/6, formats 7/7 (both flaked once on back-to-back runs,
+  passed on rerun), cmdsweep, toolsweep, audit-tools 34/34; tsc 0; build ok; shortcuts PDF regenerated.
+- Still open: PDF / .ai import (B2.5, not started), the normal canvas and colour pickers still use the built-in
+  coated model (only the print previews use the loaded profile), raster layers / images can't overprint (they
+  knock out), no transparency flattening for X-1a, no external PDF/X validator was available here (no qpdf /
+  Ghostscript / veraPDF): checks are byte-level plus Quartz rendering.
+
+## Review — 2026-11-07: CMYK print PDF (Phase 0 P0.2 / P0.3, part)
+
+- **CMYK documents export as print PDFs** (`formats/vectorPdf.ts`, `PrintColors`): every Paint's screen-preview colour maps
+  back to its exact values, so a fill typed as 0 / 96.7 / 58.5 / 0 is written `0 0.967 0.585 0 k`; gray Paints → DeviceGray;
+  **spot colours → Separation plates** (`/CSP<i> cs <tint> scn`, alternate CMYK as a type 2 function); colours with no Paint
+  are separated (neutrals → black ink only, others through the coated model). Gradients → DeviceCMYK shadings; pixel layers →
+  DeviceCMYK images (opaque blocks lose the 1 px empty rim, so no soft mask).
+- **Print markers**: TrimBox / BleedBox (= artboard; no bleed setting exists yet), OutputIntent (registered FOGRA39 condition,
+  no embedded profile), trailer /ID, Creation / ModDate. **PDF/X-1a:2003** is claimed only when a preflight finds no
+  transparency (layer opacity / blend, transparent colours, soft masks); the export toast shows CMYK, spot plates and the
+  PDF/X result or what blocks it. RGB documents export exactly as before.
+- Tests: `e2e/cmykpdf.e2e.mjs` (11): exact operators, Separation, DeviceGray, K-only black, no RGB left, boxes / intent / X
+  markers, xref offsets, transparency → no X claim with reason, CMYK shadings and images, RGB unchanged, and an
+  **independent render by macOS Quartz (sips)** of red / orange spot / gray / black on white paper.
+- Still open: a bleed setting + crop / registration marks, embedding a real ICC output profile (PDF/X-4), overprint
+  attributes + Overprint Preview, Separations Preview panel, transparency flattening for X-1a.
+## Review — 2026-11-07 (verification): CMYK status
+
+Verified in Chrome: CMYK document mode stores CMYK paints and undoes correctly. (Superseded: CMYK documents now export CMYK / spot PDFs, see the sections above.) Not done yet at the time: **PDF export still writes RGB**
+(no DeviceCMYK, Separation, OutputIntent or PDF/X), and the preview is a Neugebauer approximation, not an ICC profile. The
+picker badge said "FOGRA39 Coated"; it now says "Coated (approx.)" with an explanation.
+
+## Review — 2026-11-07: Phase 0.1 Real CMYK Documents
+
+- **Document Color Mode: RGB | CMYK**:
+  - `File ▸ Document Color Mode ▸ CMYK` and `File ▸ Document Color Mode ▸ RGB` commands in `src/core/commands.ts`.
+  - Added `colorMode: 'RGB' | 'CMYK'` to `Doc`, `Snapshot` (tracked in undo/redo history), and `ProjectFile` serialization (`io.ts`).
+  - Switched color mode commits an undoable step (`store.setColorMode()`).
+- **Paint Type (`src/core/types.ts` & `src/core/color.ts`)**:
+  - `Paint` supporting `{ space: 'rgb' | 'cmyk' | 'spot' | 'gray', values: number[] }` with `spotName`, `tint`, and `fallback` metadata.
+  - Native paint definitions added across shapes (`fillPaint`, `strokePaint`), text (`colorPaint`, `strokeColorPaint`), appearance stack (`paint`), gradients (`stops[].paint`), mesh points (`paint`), and swatches (`swatch.paint`).
+- **Color Science & CMYK Math (`src/core/color.ts`)**:
+  - Standard subtractive baseline formulas: `cmykToRgbStandard()`, `rgbToCmykStandard()`.
+  - FOGRA39 / ISO Coated v2 characterization: `cmykToRgbFogra39()`, `rgbToCmykFogra39()` with Total Area Coverage (TAC) limit clamp.
+  - Euroscale coated baseline formulas: `cmykToRgbEuroscale()`, `rgbToCmykEuroscale()`.
+  - Total Ink Coverage calculation: `totalInkCoverage(c, m, y, k)` and press safety evaluation: `isInkCoverageSafe(c, m, y, k, 300)`.
+  - Soft-proofing preview: `cmykSoftProof()`.
+  - DeviceGray conversions: `grayToRgb(k)` and `rgbToGray(rgb)`.
+- **Lossless Migration (`src/core/color.ts`)**:
+  - `migrateDocColorMode(doc, targetMode)` and `migrateLayerColorMode(layer, targetMode)` convert all fills, strokes, gradients, swatches, symbols, and patterns.
+  - Preserves exact source values in `fallback: { space, values }`, guaranteeing bit-exact 100% lossless round-trip conversions (RGB ↔ CMYK ↔ RGB).
+- **Color Picker & Swatches UI (`src/ui/ColorPicker.tsx` & `src/ui/Appearance.tsx`)**:
+  - New CMYK tab in ColorPicker with 4 independent channel sliders (Cyan, Magenta, Yellow, Black/Key) from 0 to 100%.
+  - Sliders feature live dynamic ink ramps on the track, direct numeric inputs, Total Ink Coverage (TAC) indicator with press limit warnings, and 8 standard process swatches (Process Cyan, Magenta, Yellow, Black, Rich Black, Warm Red, Reflex Blue, Process Green).
+  - Editing CMYK sliders modifies pure CMYK state directly without RGB recalculation drift.
+  - Document swatches store native `Paint` objects, display true CMYK readouts in tooltips and the swatch editor, and serialize losslessly in project files.
+- **Tests & Verification**:
+  - New test suite in `src/test/cmyk.test.ts` (20 tests passing) covering Paint type handling, color conversions (FOGRA39 and standard formulas), swatch serialization, lossless document migration, and CMYK slider conversions.
+  - Full unit test suite: 47/47 files, 454/454 unit tests pass (`npm test`).
+  - TypeScript type check: `npx tsc -p tsconfig.app.json --noEmit` = 0 errors.
+  - Linter: `npx oxlint` clean (0 errors, 0 warnings on modified files).
+  - Production build: `npm run build` succeeds (2370 modules transformed in < 1s).
+
+
+## Review — 2026-11-07: Envelope Distort ▸ Make with Warp
+
+- **Object ▸ Envelope Distort ▸ Make with Warp…** (`core/envelope.ts`, dialog in `ui/Dialogs.tsx`): Illustrator's 15 styles
+  (Arc, Arc Lower/Upper, Arch, Bulge, Shell Lower/Upper, Flag, Wave, Fish, Rise, Fisheye, Inflate, Squeeze, Twist),
+  Horizontal / Vertical, Bend and Horizontal / Vertical Distortion, live preview, Cancel restores, OK = one undo step "Warp: <style>".
+- Real vector result: each Bézier segment is cut into short pieces (de Casteljau) and every anchor and handle goes through the
+  warp, so straight edges become true curves (sampled error < 0.5 px in tests); original anchors keep corner / smooth.
+- The selection warps as one envelope (joint bounds); shapes inside selected groups are included. Text needs Create Outlines first.
+- Tests: `src/test/envelope.test.ts` (8), `e2e/envelope.e2e.mjs` (6, rendered pixels).
+- Still open: live (re-editable) envelopes, Make with Mesh / Top Object, warping text and images directly, a shortcut
+  (Illustrator's ⌥⇧⌘W is already Export here).
+
+## Review — 2026-11-06: lint pass
+
+`npx oxlint`: 77 → 39 warnings. Removed unused imports, variables and a dead `checkerPattern`; comma
+expressions in the flood fill (`proTools.ts`) became blocks; Brush preset picker lost its unused props. The 39
+left are deliberate: 17 `only-export-components` (dev hot-reload only) and 22 React hook hints on effects that
+mirror store state into local state or re-score the command palette on reopen. 414/414 unit tests and the
+touched e2e suites pass.
+
+## Review — 2026-11-06: performance with many objects + smudge fix
+
+`e2e/perf.e2e.mjs` (500 shapes on a 4000 × 3000 artboard):
+
+| Step | Before | Now | Fix |
+| --- | --- | --- | --- |
+| First render of 500 shapes | 47.7 s | 1.2 s | The Layers panel rebuilt every row on every store change (each pan, zoom, pointer move) and again 220 ms after each render: the row list is now memoised on the layers, active layer, selection, search, drag and thumbnail tick. |
+| Pan, per frame | 1552 ms | ~100 ms (42 ms warm) | Same. |
+| Select all / move all / SVG | 0.4 / 0.8 / 1.0 s | 0.7 / 0.6 / 1.0 s | — |
+| Smudge | Mostly did nothing (carry needed an equal-size dab box) | Fixed (see Skill Photo). |
+
+Tests: e2e driver clears saved settings per suite and again on the first navigation (a closing tab can still save on unload); `toolsweep` resets tool options per tool and gives pixel tools a pixel layer; `pencil` / `vectortools` wait for settled geometry.
+
+---
+
+## Review — 2026-11-05 (later): gradient Method + Dither
+
+Research: Illustrator 2026 (v30) added a gradient **Method** menu and **dithering**.
+
+| Area | Now |
+| --- | --- |
+| Method | `ShapeGradient.method`: **Classic** (sRGB numbers, as before), **Perceptual** (OKLab: even lightness, vivid middles), **Linear light** (mixes light). Drawn as 16 computed Classic stops per pair (`gradientMethod.ts` `renderStops`), so canvas, SVG and PDF all show it; the web kit's CSS uses `in oklab` / `in srgb-linear`. Fill and stroke gradients; the editor's preview bar shows it too. |
+| Dither | Fills: ±1 level of noise (2/255 black / white, one tile pixel per device pixel, clipped to the shape) breaks up 8-bit banding. |
+
+Measured (e2e): red → green middle Classic (127, 127, 0), Linear (187, 188, 0), Perceptual (207, 168, 0); a #202020 → #282828 ramp's longest flat band 94 px → 12 px with Dither, average level within 0.3.
+
+Tests: `src/test/gradientMethod.test.ts` (6), `e2e/gradientmethod.e2e.mjs` (8).
+
+---
+
+## Review — 2026-11-05: Make Pattern from artwork
+
+| Area | Before | Now |
+| --- | --- | --- |
+| Patterns | 10 parametric presets | **Object ▸ Pattern ▸ Make Pattern**: selected shapes / text (groups give their contents) become a tile with 15 % breathing room in the document's **pattern library** (`Doc.patterns`, `core/patternArt.ts`; undoable, saved in project files). Appearance ▸ Fill ▸ Pattern lists the library after the presets (⌥-click removes one). A fill keeps its own copy of the tile (`PatternFill.art`), so library changes never alter placed fills. **Tile width** slider; the tile keeps its proportions; the fill's background colour shows between the motifs. |
+| Rendering | — | Art tiles are drawn with the vector drawer (`setArtDrawer` ← `drawLayerVector`) at the view's resolution, with the 8 neighbours so art crossing an edge tiles seamlessly; cached per tile + resolution. |
+| SVG | — | A real `<pattern>` of the artwork's own `<path>` / `<text>` (9 copies), scaled to the tile width. |
+
+Tests: `src/test/patternArt.test.ts` (4), `e2e/makepattern.e2e.mjs` (7: drawn shapes, menu command, library chip click, repeat across and down in pixels, SVG, project round trip, ⌥-click + ⌘Z). 408 unit tests; full e2e: commands 162/162, tools 112/112, the usual two late-run flakes.
+
+Flaky tests fixed: `features` (smart guides) read the guide pixel 80 ms after the last move — on a busy machine before the redraw; it now waits for two animation frames. `shapewidgets` (star inner %) assumed the star landed exactly where it was dragged; smart guides can snap its corner while drawing, so the handle is now dropped at 80 % of the star's actual radius.
+
+Still open: editing a library pattern in place (Pattern Options), brick / hex tile offsets, recolouring pattern art.
+
+---
+
+## Review — 2026-11-04 (later): live distort effects
+
+| Area | Before | Now |
+| --- | --- | --- |
+| Distort & Transform | Pucker / Bloat only as destructive brush tools | `ShapeProps.distort` (`core/liveDistort.ts`): **Roughen** (size, detail, smooth, reseed), **Zig Zag** (size, ridges, smooth), **Pucker & Bloat** (%), **Twist** (°), live: the shape keeps its own geometry (a rectangle stays a rectangle, corners / widgets still work). `shapePath` records the outline as dense points (`FlattenRecorder`), bends it and draws it back, so rendering, hit tests and SVG export all follow; render padding grows with the effect. |
+| Expand | — | Properties ▸ Appearance ▸ Distort ▸ **Expand** bakes it into an ordinary path, box centred where it was (rotation pivot unchanged), gradients and mesh remapped onto the new box. One undo step. |
+| Panel | — | Distort row: effect, eye, amount (Pucker / Bloat / Angle / Size), detail / ridges, Smooth, reseed. |
+
+Tests: `src/test/liveDistort.test.ts` (9: recorder, pucker / bloat geometry, zig zag offsets, roughen bound + seed, twist, padding, shapePath, Expand = same outline, SVG), `e2e/distort.e2e.mjs` (11, real drawing + clicks + pixels, Expand, ⌘Z). 404 unit tests; full e2e: all pass (features / shapewidgets flaked late in the full run, pass alone, as before).
+
+Still open: Offset Path / Round Corners as live effects, live Gaussian blur (needs canvas filter support in WebKit), effects per stack item.
+
+---
+
+## Review — 2026-11-04: Appearance stack (extra fills and strokes)
+
+| Area | Before | Now |
+| --- | --- | --- |
+| Fills / strokes per object | One fill and one stroke | `ShapeProps.appearance`: any number of extra fills and strokes, each **below** the base fill or **above** the base stroke, with colour or gradient, opacity, blend (multiply, screen, overlay, soft light…), weight / inside / outside / dash for strokes, and an X / Y offset. Each item is the same outline wearing only that paint, so live corners, compound paths and gradients all work (`core/appearanceStack.ts`). |
+| Panel | — | Properties ▸ Appearance ▸ **Stack**: + Fill, + Stroke, presets (Double outline, Sticker, Hard shadow, Offset print, Gradient sheen, Inner line), per item: eye, colour, weight, move up / down (crossing the base row flips below / above), place, blend, align, opacity, X / Y, remove. One undo step per change. |
+| Everywhere else | — | Render padding grows with wide strokes and offsets; SVG export writes one group (below items, base, above items; `mix-blend-mode` + isolation); Recolor and the colour list include the stack; Eyedropper look copy carries it; project files keep it. |
+
+Tests: `src/test/appearanceStack.test.ts` (7), `e2e/appearancestack.e2e.mjs` (14: real button clicks, pixels for outline / tint / hide / reorder / shadow offset, undo, preset, number field, SVG order, project round trip). 395 unit tests; appearance, gradients, formats, colors, vector, repeat e2e pass.
+
+Still open: on-canvas offset handles, gradients edited per stack item (preset gradients only), live effects (drop shadow / blur per item).
+
+---
+
+## Review — 2026-11-03: Repeat (Radial / Grid / Mirror), menu fix
+
+| Area | Now |
+| --- | --- |
+| Object ▸ Repeat | **Radial** (instances, radius; the original sits at the top of the circle), **Grid** (columns, rows, gaps, brick row shift, mirror every other column / row), **Mirror** (vertical, horizontal or four-way, gap). Live: the selection becomes a repeat group; its copies are real locked layers tagged `repeatOf`, rebuilt after every edit by `applyRepeats` (store.commit / live, next to hugs; cached so unchanged copies keep their identity). Edit, recolour or ⌘-drag the original and every copy follows; undo, project files and SVG/PDF export include the copies. Clicking a copy selects the repeat. **Expand** keeps the copies as ordinary layers; **Release** keeps only the original; ungrouping turns copies into plain layers. Properties ▸ Repeat section; "Repeat Radial/Grid/Mirror" in Next steps. (`core/repeat.ts` pure, `core/repeatOps.ts`, `ui/RepeatPanel.tsx`) |
+| Menus | **Bug fixed:** submenus (Object ▸ Path, Repeat…) were clipped by the scrolling menu panel and clicks went to the canvas; now portaled to `<body>` and kept on screen. |
+
+Tests: `src/test/repeat.test.ts` (12), `e2e/repeat.e2e.mjs` (15: real Rectangle drag, real submenu clicks, pixel checks, click-a-copy, follow on move/recolour, undo, switch kind, SVG, Expand, Release, save/load). 388 unit tests, build, oxlint.
+
+Known: the selection frame of a repeat shows the original only (copies are locked); dragging still moves everything. `features` (smart guides) and `shapewidgets` (star inner %) pass alone, on old and new code, but can flake late in a full e2e run.
+
+Still open: on-canvas Repeat handles (radius / gap), path repeat, appearance stack, live effects.
+
+---
+
 ## Review — 2026-10-18 (evening): Image Trace power-up + Image Trace tool
 
 | Area | Before | Now |

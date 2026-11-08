@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Command as CmdIcon, X, Loader2, Search, Zap, Cpu, Menu as MenuIcon, ChevronLeft, ChevronRight, PanelRight, Plus } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { Check, Command as CmdIcon, X, Loader2, Search, Zap, Cpu, Menu as MenuIcon, ChevronLeft, ChevronRight, PanelRight, Plus, Sparkles } from 'lucide-react';
 import { store, useStore } from '../core/store';
 import { COMMANDS, formatKeys } from '../core/commands';
 import type { MenuId } from '../core/commands';
@@ -7,19 +9,58 @@ import { onCursor } from './Viewport';
 import { getAdjustEngine } from '../core/gl';
 import { toolLabel } from './ToolRail';
 import { WorkspaceSwitcher } from './Workspace';
+import { toggleAssistant } from '../ai/open';
 import { useRoom } from './responsive';
+import { uiZoom } from './theme';
 import { toggleDock, useLayout } from './layout';
 
 const MENUS: MenuId[] = ['File', 'Edit', 'Image', 'Layer', 'Select', 'Filter', 'View', 'Window', 'Help'];
 
 type MenuItemEntry = { type: 'command'; cmd: (typeof COMMANDS)[0] } | { type: 'submenu'; name: string; items: (typeof COMMANDS); sep?: boolean };
 
+/**
+ * A submenu rendered on <body>: the menu panel scrolls (overflow) and has a backdrop filter, so a
+ * flyout nested inside it would be clipped and clicks would fall through to the canvas. Placed
+ * beside its item, flipped to the left near the right edge and kept inside the window.
+ */
+function SubMenuPortal({ anchor, onMouseEnter, children }: { anchor: DOMRect; onMouseEnter: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const z = uiZoom();
+    const r = el.getBoundingClientRect();
+    let left = anchor.right - 2;
+    if (left + r.width > innerWidth - 4) left = Math.max(4, anchor.left - r.width + 2);
+    let top = anchor.top - 4;
+    if (top + r.height > innerHeight - 4) top = Math.max(4, innerHeight - 4 - r.height);
+    setPos({ left: left / z, top: top / z });
+  }, [anchor]);
+  return createPortal(
+    <div
+      ref={ref}
+      className="menu-sub-pop"
+      style={{ position: 'fixed', left: pos?.left ?? anchor.right / uiZoom(), top: pos?.top ?? anchor.top / uiZoom(), visibility: pos ? 'visible' : 'hidden' }}
+      onMouseEnter={onMouseEnter}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
 export function MenuBar() {
   useStore();
   const room = useRoom();
   const lay = useLayout();
   const [open, setOpen] = useState<MenuId | 'all' | null>(null);
-  const [activeSub, setActiveSub] = useState<string | null>(null);
+  const [activeSub, setActiveSubName] = useState<string | null>(null);
+  const [subAnchor, setSubAnchor] = useState<DOMRect | null>(null);
+  const setActiveSub = (name: string | null, from?: Element) => {
+    setActiveSubName(name);
+    if (from) setSubAnchor(from.getBoundingClientRect());
+  };
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -28,7 +69,8 @@ export function MenuBar() {
       return;
     }
     const close = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) {
+      // Submenus live on <body> (see SubMenuPortal), so clicks in them count as inside
+      if (!ref.current?.contains(e.target as Node) && !(e.target as Element).closest?.('.menu-sub-pop')) {
         setOpen(null);
         setActiveSub(null);
       }
@@ -97,8 +139,8 @@ export function MenuBar() {
         <div
           key={entry.name}
           className={`menu-sub-wrapper ${isSubOpen ? 'open' : ''}`}
-          onMouseEnter={() => {
-            if (!allDisabled) setActiveSub(entry.name);
+          onMouseEnter={(e) => {
+            if (!allDisabled) setActiveSub(entry.name, e.currentTarget.querySelector('.menu-item') ?? e.currentTarget);
           }}
         >
           {entry.sep && <div className="menu-sep" />}
@@ -107,18 +149,15 @@ export function MenuBar() {
             disabled={allDisabled}
             onClick={(e) => {
               e.stopPropagation();
-              if (!allDisabled) setActiveSub(isSubOpen ? null : entry.name);
+              if (!allDisabled) setActiveSub(isSubOpen ? null : entry.name, e.currentTarget);
             }}
           >
             <span className="menu-check" />
             <span className="menu-label">{entry.name}</span>
             <span className="menu-sub-arrow"><ChevronRight size={13} /></span>
           </button>
-          {isSubOpen && (
-            <div
-              className="menu-sub-pop"
-              onMouseEnter={() => setActiveSub(entry.name)}
-            >
+          {isSubOpen && subAnchor && (
+            <SubMenuPortal anchor={subAnchor} onMouseEnter={() => setActiveSub(entry.name)}>
               {entry.items.map((subCmd) => {
                 const disabled = subCmd.enabled ? !subCmd.enabled() : false;
                 return (
@@ -140,7 +179,7 @@ export function MenuBar() {
                   </div>
                 );
               })}
-            </div>
+            </SubMenuPortal>
           )}
         </div>
       );
@@ -206,6 +245,10 @@ export function MenuBar() {
       )}
       <div className="opt-spacer" />
       <WorkspaceSwitcher compact={room.narrow} />
+      <button className="palette-btn ai-launch" onClick={() => toggleAssistant()} title={`AI assistant — Claude, ChatGPT, Gemini (${formatKeys('Mod+Alt+K')})`} aria-label="AI assistant">
+        <Sparkles size={12} />
+        {!room.narrow && <span>Ask AI</span>}
+      </button>
       <button className="palette-btn" onClick={() => store.set({ paletteOpen: true })} title="Search every command (⌘K)">
         <Search size={12} />
         {!room.narrow && <span>Search commands</span>}
@@ -375,6 +418,9 @@ export function StatusBar() {
         <>
           <span className="sb-item">
             {doc.width} × {doc.height} px
+          </span>
+          <span className="sb-item" data-color-space title="Working colour space (Image ▸ Color Space)">
+            {doc.colorSpace === 'display-p3' ? 'Display P3' : 'sRGB'}
           </span>
           <span className="sb-item">
             <input

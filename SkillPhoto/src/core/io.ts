@@ -1,12 +1,12 @@
 import type { Doc, Layer, Mask, Rect, SmartData } from './types';
 import { makeLayer, withLayer } from './types';
 import { groupLayers } from './groups';
-import { canvasToBlob, createCanvas, ctx2d, loadImage } from './canvas';
+import { canvasToBlob, createCanvas, ctx2d, hasWideGamut, loadImage, pixelsLike, spaceOf, workingSpace, type ColorSpaceId } from './canvas';
 import { renderDocument } from './render';
 import { contentBounds } from './snap';
 import { store } from './store';
 
-export const IMAGE_ACCEPT = 'image/*,.photoscale,.psc,.psd,.tif,.tiff,.heic,.heif';
+export const IMAGE_ACCEPT = 'image/*,.photoscale,.psc,.psd,.tif,.tiff,.heic,.heif,.dng,.cr2,.nef,.arw,.raw,.orf,.rw2,.pef';
 
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -15,24 +15,29 @@ export function isTauri(): boolean {
 const MAX_IMAGE_DIM = 16384;
 const MAX_IMAGE_PIXELS = 64_000_000;
 
-function drawImageSafely(src: { width: number; height: number }, draw: (ctx: CanvasRenderingContext2D, dw: number, dh: number) => void): HTMLCanvasElement {
+function drawImageSafely(src: { width: number; height: number }, draw: (ctx: CanvasRenderingContext2D, dw: number, dh: number) => void, space: ColorSpaceId = workingSpace(), quiet = false): HTMLCanvasElement {
   let w = src.width;
   let h = src.height;
   if (w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM || w * h > MAX_IMAGE_PIXELS) {
     const scale = Math.min(MAX_IMAGE_DIM / w, MAX_IMAGE_DIM / h, Math.sqrt(MAX_IMAGE_PIXELS / (w * h)));
     const dw = Math.max(1, Math.round(w * scale));
     const dh = Math.max(1, Math.round(h * scale));
-    store.toast(`Image size ${w}×${h} exceeds safe canvas bounds. Scaled to ${dw}×${dh} to prevent crash.`, 'info');
-    const c = createCanvas(dw, dh);
+    if (!quiet) store.toast(`Image size ${w}×${h} exceeds safe canvas bounds. Scaled to ${dw}×${dh} to prevent crash.`, 'info');
+    const c = createCanvas(dw, dh, space);
     draw(ctx2d(c), dw, dh);
     return c;
   }
-  const c = createCanvas(w, h);
+  const c = createCanvas(w, h, space);
   draw(ctx2d(c), w, h);
   return c;
 }
 
-export async function fileToCanvas(file: Blob & { name?: string }): Promise<HTMLCanvasElement> {
+/**
+ * Decodes an image file. By default the colour space follows the content: a photo with colours outside
+ * sRGB (a Display P3 / Adobe RGB / wide-gamut file) comes back as a Display P3 canvas, anything else as
+ * sRGB. `space` forces one (placing into a document uses the document's).
+ */
+export async function fileToCanvas(file: Blob & { name?: string }, space?: ColorSpaceId): Promise<HTMLCanvasElement> {
   // TIFF: browsers other than Safari can't decode it, so use our own decoder
   if (/\.tiff?$/i.test(file.name ?? '') || file.type === 'image/tiff') {
     try {
@@ -43,14 +48,25 @@ export async function fileToCanvas(file: Blob & { name?: string }): Promise<HTML
     } catch {
       const { decodeTiff } = await import('./formats/tiff');
       const r = await decodeTiff(await file.arrayBuffer());
-      const c = createCanvas(r.width, r.height);
-      ctx2d(c).putImageData(new ImageData(r.data as Uint8ClampedArray<ArrayBuffer>, r.width, r.height), 0, 0);
+      const c = createCanvas(r.width, r.height, 'srgb'); // TIFF pixels are read as sRGB
+      ctx2d(c).putImageData(pixelsLike('srgb', r.data as Uint8ClampedArray, r.width, r.height), 0, 0);
       return c;
     }
   }
   try {
     const bmp = await createImageBitmap(file);
-    const c = drawImageSafely(bmp, (ctx, dw, dh) => ctx.drawImage(bmp, 0, 0, dw, dh));
+    const draw = (ctx: CanvasRenderingContext2D, dw: number, dh: number) => ctx.drawImage(bmp, 0, 0, dw, dh);
+    if (space) {
+      const c = drawImageSafely(bmp, draw, space);
+      bmp.close();
+      return c;
+    }
+    const wide = drawImageSafely(bmp, draw, 'display-p3');
+    if (hasWideGamut(wide)) {
+      bmp.close();
+      return wide;
+    }
+    const c = drawImageSafely(bmp, draw, 'srgb', true);
     bmp.close();
     return c;
   } catch {
@@ -68,7 +84,7 @@ const stripExt = (name: string) => name.replace(/\.[^.]+$/, '');
 
 export function docFromCanvas(canvas: HTMLCanvasElement, title: string, sourceName?: string): Doc {
   const layer = makeLayer({ kind: 'raster', name: 'Background', canvas, width: canvas.width, height: canvas.height });
-  return store.addDoc({ title, width: canvas.width, height: canvas.height, layers: [layer], sourceName });
+  return store.addDoc({ title, width: canvas.width, height: canvas.height, layers: [layer], sourceName, colorSpace: spaceOf(canvas) });
 }
 
 export async function openFiles(files: FileList | File[]) {
@@ -86,12 +102,14 @@ export async function openFiles(files: FileList | File[]) {
       const opened = await store.task(`Opening ${file.name}`, () => openSvg(file));
       if (opened) continue;
     }
-    if (!file.type.startsWith('image/') && !/\.(png|jpe?g|webp|gif|bmp|avif|heic|heif|ico|svg|tiff?)$/i.test(file.name)) {
+    if (!file.type.startsWith('image/') && !/\.(png|jpe?g|webp|gif|bmp|avif|heic|heif|ico|svg|tiff?|dng|cr2|nef|arw|raw|orf|rw2|pef)$/i.test(file.name)) {
       store.toast(`${file.name}: unsupported file type`, 'error');
       continue;
     }
     await store.task(`Opening ${file.name}`, async () => {
       try {
+        // 16-bit PNG / TIFF / RAW keep every value (the browser would decode them to 8 bits)
+        if (/\.(png|tiff?|dng|cr2|nef|arw|raw|orf|rw2|pef)$/i.test(file.name) && (await openHighBitFile(file))) return;
         const c = await fileToCanvas(file);
         docFromCanvas(c, stripExt(file.name), file.name);
       } catch (err) {
@@ -224,7 +242,7 @@ export async function placeImage(file: Blob, name = 'Placed Image', o: PlaceOpti
   if (!doc) return;
   // SVG comes in as editable vectors (markup the importer can't read is placed as an image)
   if (file.type === 'image/svg+xml' && (await placeSvg(file, name, o))) return;
-  const c = await fileToCanvas(file);
+  const c = await fileToCanvas(file, workingSpace());
   // A shape acts as a frame: the image covers it and is clipped to it
   const frameLayer = o.frame !== undefined ? o.frame : store.activeLayer?.kind === 'shape' ? store.activeLayer : null;
   const frame = frameLayer ? contentBounds(frameLayer) : null;
@@ -275,7 +293,7 @@ const PROJECT_FILE = /\.(photoscale|psc|illustratorscale|psd)$/i;
 export async function dropFiles(files: File[], o: { at?: { x: number; y: number }; frame?: Layer | null; asDocuments?: boolean } = {}) {
   const doc = store.doc;
   if (!doc || o.asDocuments) return openFiles(files);
-  const isImage = (f: File) => !PROJECT_FILE.test(f.name) && (f.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|avif|heic|heif|ico|svg|tiff?)$/i.test(f.name));
+  const isImage = (f: File) => !PROJECT_FILE.test(f.name) && (f.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|avif|heic|heif|ico|svg|tiff?|dng|cr2|nef|arw|raw|orf|rw2|pef)$/i.test(f.name));
   const images = files.filter(isImage);
   let placed = 0;
   for (const f of images) {
@@ -355,11 +373,100 @@ const flatPixels = (doc: Doc) => {
   return { canvas: c, data: ctx2d(c).getImageData(0, 0, c.width, c.height).data };
 };
 
+/** 16-bit composite of the document (float compositing); falls back to the 8-bit render, saying why. */
+export async function highBitComposite(doc: Doc): Promise<{ data: Uint16Array; exact: boolean; why: string | null }> {
+  const { compositeBuffer, highBitCompositeBlocker } = await import('./hibit');
+  const why = highBitCompositeBlocker(doc);
+  const pb = why ? null : compositeBuffer(doc, 16);
+  if (pb) return { data: pb.getContiguousArray() as Uint16Array, exact: true, why: null };
+  const { data } = flatPixels(doc);
+  return { data: Uint16Array.from(data, (v) => v * 257), exact: false, why: why ?? 'no float GPU support' };
+}
+
+/** File ▸ Export: 16-bit PNG or TIFF from the full-depth composite. */
+export async function exportHighBit(doc: Doc, kind: 'png' | 'tiff') {
+  const { data, exact, why } = await highBitComposite(doc);
+  let bytes: Uint8Array;
+  // Both formats carry the working space's profile (written by us: no licensed profile needed)
+  const { makeWorkingProfile } = await import('./icc');
+  const space = doc.colorSpace ?? 'srgb';
+  const icc = makeWorkingProfile(space);
+  if (kind === 'png') {
+    const { encodePng16 } = await import('./formats/png16');
+    bytes = await encodePng16(doc.width, doc.height, data, { name: space === 'srgb' ? 'sRGB' : 'Display P3', bytes: icc });
+  } else {
+    const { encodeTiff16 } = await import('./formats/tiff');
+    bytes = encodeTiff16(doc.width, doc.height, data, 72, icc);
+  }
+  await saveBlob(new Blob([bytes as BlobPart], { type: kind === 'png' ? 'image/png' : 'image/tiff' }), `${doc.title} (16-bit).${kind === 'png' ? 'png' : 'tif'}`);
+  if (exact) store.toast(`16-bit ${kind.toUpperCase()} written from the ${doc.depth ?? 8}-bit layers`, 'success');
+  else store.toast(`16-bit ${kind.toUpperCase()} written from the 8-bit render (${why} not composited in float yet)`, 'info');
+}
+
+/** 16-bit PNG / TIFF / RAW: open as a 16-bit document with the file's exact values. Null when the file isn't 16-bit. */
+export async function openHighBitFile(file: Blob & { name?: string }): Promise<Doc | null> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let img: { width: number; height: number; data: Uint16Array; icc?: Uint8Array } | null = null;
+  let rawNote = '';
+  if (/\.png$/i.test(file.name ?? '') || file.type === 'image/png') {
+    const { decodePng16 } = await import('./formats/png16');
+    const r = await decodePng16(bytes).catch(() => null);
+    if (r && r.bitDepth === 16) img = r;
+  } else if (/\.(dng|cr2|nef|arw|raw|orf|rw2|pef)$/i.test(file.name ?? '')) {
+    const { decodeRaw } = await import('./formats/raw');
+    const r = await decodeRaw(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer).catch(() => null);
+    if (r?.data) {
+      img = { width: r.width, height: r.height, data: r.data };
+      const model = [r.meta.make, r.meta.model].filter(Boolean).join(' ');
+      if (model) rawNote = ` · ${model} RAW (16-bit)`;
+    }
+  } else if (/\.tiff?$/i.test(file.name ?? '') || file.type === 'image/tiff') {
+    const { decodeTiff } = await import('./formats/tiff');
+    const r = await decodeTiff(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer).catch(() => null);
+    if (r?.data16) img = { width: r.width, height: r.height, data: r.data16, icc: r.icc };
+  }
+  if (!img) return null;
+  const { PixelBuffer } = await import('./pixels');
+  // An embedded profile other than sRGB: convert at full precision (to Display P3 for wide-gamut files)
+  let space: 'srgb' | 'display-p3' = 'srgb';
+  let note = rawNote;
+  if (img.icc) {
+    const I = await import('./icc');
+    try {
+      const prof = I.parseIcc(img.icc);
+      if (I.matchesWorkingSpace(prof, 'display-p3')) space = 'display-p3';
+      else if (!I.matchesWorkingSpace(prof, 'srgb')) {
+        space = 'display-p3';
+        const f = new Float32Array(img.data.length);
+        for (let i = 0; i < f.length; i++) f[i] = img.data[i] / 65535;
+        I.convertToWorkingFloat(prof, f, space);
+        img = { ...img, data: Uint16Array.from(f, (v) => Math.round(v * 65535)) };
+        note = ` · converted from “${prof.description || 'embedded profile'}” to Display P3`;
+      }
+    } catch (e) {
+      note = ` · embedded profile ignored (${(e as Error).message})`;
+    }
+  }
+  const pb = PixelBuffer.fromArray(img.data, img.width, img.height, 16);
+  const canvas = pb.toCanvas(space, true);
+  const layer = makeLayer({ kind: 'raster', name: 'Background', canvas, width: img.width, height: img.height });
+  const withPx = { ...layer, pixels: pb } as Layer;
+  const doc = store.addDoc({ title: stripExt(file.name ?? 'Untitled'), width: img.width, height: img.height, layers: [withPx], sourceName: file.name, colorSpace: space });
+  doc.depth = 16;
+  doc.history[0].depth = 16;
+  store.emit();
+  store.toast(`Opened as a 16-bit document${note}`);
+  return doc;
+}
+
 export async function exportTiff(doc: Doc, cmyk = false) {
+  const isCmyk = cmyk || doc.colorMode === 'cmyk';
   const { encodeTiff } = await import('./formats/tiff');
   const { data } = flatPixels(doc);
-  const bytes = encodeTiff({ width: doc.width, height: doc.height, data }, { cmyk, dpi: cmyk ? 300 : 72 });
-  await saveBlob(new Blob([bytes as BlobPart], { type: 'image/tiff' }), `${doc.title}${cmyk ? ' (CMYK)' : ''}.tif`);
+  // RGB TIFFs carry the working-space profile (tag 34675); CMYK files never do — the working profile is RGB.
+  const { makeWorkingProfile } = await import('./icc');
+  const bytes = encodeTiff({ width: doc.width, height: doc.height, data }, { cmyk: isCmyk, dpi: isCmyk ? 300 : 72, icc: isCmyk ? undefined : makeWorkingProfile(doc.colorSpace ?? 'srgb') });
+  await saveBlob(new Blob([bytes as BlobPart], { type: 'image/tiff' }), `${doc.title}${isCmyk ? ' (CMYK)' : ''}.tif`);
 }
 
 export async function exportPdf(doc: Doc, opts: { lossless?: boolean; quality?: number; dpi?: number } = {}) {
@@ -516,7 +623,8 @@ export async function batchExportFormats(doc: Doc, config: BatchExportConfig): P
       const { encodeTiff } = await import('./formats/tiff');
       const { data } = flatPixels(doc);
       const isCmyk = fmt === 'cmyk-tiff';
-      const bytes = encodeTiff({ width: doc.width, height: doc.height, data }, { cmyk: isCmyk, dpi: isCmyk ? 300 : 72 });
+      const { makeWorkingProfile } = await import('./icc');
+      const bytes = encodeTiff({ width: doc.width, height: doc.height, data }, { cmyk: isCmyk, dpi: isCmyk ? 300 : 72, icc: isCmyk ? undefined : makeWorkingProfile(doc.colorSpace ?? 'srgb') });
       files.push({
         name: `${doc.title}${isCmyk ? ' (CMYK)' : ''}.tif`,
         data: bytes,
@@ -580,7 +688,12 @@ export async function renderExport(doc: Doc, format: ExportFormat, quality: numb
   }
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(flat, 0, 0, w, h);
-  return canvasToBlob(out, `image/${format}`, quality);
+  const blob = await canvasToBlob(out, `image/${format}`, quality);
+  // Tag the file with the working space, so other apps show the same colours
+  const { makeWorkingProfile } = await import('./icc');
+  const { embedProfile } = await import('./formats/iccEmbed');
+  const space = doc.colorSpace ?? 'srgb';
+  return embedProfile(blob, makeWorkingProfile(space), space === 'srgb' ? 'sRGB' : 'Display P3');
 }
 
 // ---------------------------------------------------------------- Photoshop
@@ -622,6 +735,8 @@ interface ProjectFile {
   layers: ProjectLayer[];
   safeZone?: string;
   grids?: Doc['grids'];
+  /** Display P3 documents (the PNGs carry their profile); absent = sRGB. */
+  colorSpace?: Doc['colorSpace'];
 }
 
 export function serializeProject(doc: Doc): string {
@@ -634,6 +749,7 @@ export function serializeProject(doc: Doc): string {
     activeId: doc.activeId,
     safeZone: doc.safeZone,
     grids: doc.grids,
+    colorSpace: doc.colorSpace,
     layers: doc.layers.map((l) => {
       const { canvas, mask, v: _v, smart, ...rest } = l;
       return {
@@ -647,9 +763,9 @@ export function serializeProject(doc: Doc): string {
   return JSON.stringify(file);
 }
 
-async function dataUrlToCanvas(url: string): Promise<HTMLCanvasElement> {
+async function dataUrlToCanvas(url: string, space: ColorSpaceId = 'srgb'): Promise<HTMLCanvasElement> {
   const img = await loadImage(url);
-  const c = createCanvas(img.naturalWidth, img.naturalHeight);
+  const c = createCanvas(img.naturalWidth, img.naturalHeight, space);
   ctx2d(c).drawImage(img, 0, 0);
   return c;
 }
@@ -658,17 +774,18 @@ export async function loadProject(json: string, fallbackTitle = 'Untitled'): Pro
   const file = JSON.parse(json) as ProjectFile;
   if (file.format !== 'photoscale' || !Array.isArray(file.layers)) throw new Error('Not a Skill Photo project');
   const layers: Layer[] = [];
+  const space: ColorSpaceId = file.colorSpace === 'display-p3' ? 'display-p3' : 'srgb';
   for (const pl of file.layers) {
     const { png, mask, smart, ...rest } = pl;
     const layer = makeLayer({ ...rest, kind: rest.kind, name: rest.name });
-    if (smart) layer.smart = { ...smart, source: await dataUrlToCanvas(smart.source) };
+    if (smart) layer.smart = { ...smart, source: await dataUrlToCanvas(smart.source, space) };
     (layer as { id: string }).id = rest.id;
-    if (png) layer.canvas = await dataUrlToCanvas(png);
-    if (mask) layer.mask = { x: mask.x, y: mask.y, enabled: mask.enabled, canvas: await dataUrlToCanvas(mask.png) };
+    if (png) layer.canvas = await dataUrlToCanvas(png, space);
+    if (mask) layer.mask = { x: mask.x, y: mask.y, enabled: mask.enabled, canvas: await dataUrlToCanvas(mask.png, space) };
     layers.push(layer);
   }
   if (!layers.length) throw new Error('Project has no layers');
-  const doc = store.addDoc({ title: file.title || fallbackTitle, width: file.width, height: file.height, layers, safeZone: file.safeZone });
+  const doc = store.addDoc({ title: file.title || fallbackTitle, width: file.width, height: file.height, layers, safeZone: file.safeZone, colorSpace: space });
   if (layers.some((l) => l.id === file.activeId)) doc.activeId = file.activeId;
   if (Array.isArray(file.grids)) doc.grids = file.grids;
   doc.history[0].activeId = doc.activeId;

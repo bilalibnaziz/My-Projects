@@ -1,10 +1,11 @@
 // Liquify workspace: push, twirl, pucker and bloat pixels with a brush on a live preview, then apply.
+// Freeze Mask (F) protects areas from every tool; Thaw Mask (D) frees them again.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { X, Move, RotateCw, RotateCcw, Shrink, Expand, Eraser } from 'lucide-react';
+import { X, Move, RotateCw, RotateCcw, Shrink, Expand, Eraser, Snowflake, Sun } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { store } from '../core/store';
 import { createCanvas, ctx2d } from '../core/canvas';
-import { applyLiquifyStroke, commitLiquify, createLiquifyMesh, renderLiquifyPreview } from '../core/liquify';
+import { applyLiquifyStroke, commitLiquify, createLiquifyMesh, freezeOverlay, renderLiquifyPreview, setFreeze } from '../core/liquify';
 import type { LiquifyMesh, LiquifyMode } from '../core/liquify';
 import { Slider } from './widgets';
 
@@ -15,7 +16,10 @@ const MODES: { id: LiquifyMode; label: string; key: string; icon: ReactNode }[] 
   { id: 'twirl-ccw', label: 'Twirl Counterclockwise', key: 'V', icon: <RotateCcw size={15} /> },
   { id: 'pucker', label: 'Pucker', key: 'S', icon: <Shrink size={15} /> },
   { id: 'bloat', label: 'Bloat', key: 'B', icon: <Expand size={15} /> },
+  { id: 'freeze', label: 'Freeze Mask', key: 'F', icon: <Snowflake size={15} /> },
+  { id: 'thaw', label: 'Thaw Mask', key: 'D', icon: <Sun size={15} /> },
 ];
+const MASKING = new Set<LiquifyMode>(['freeze', 'thaw']);
 
 /** Modes that keep working while the brush is held still (like Photoshop). */
 const CONTINUOUS = new Set<LiquifyMode>(['twirl-cw', 'twirl-ccw', 'pucker', 'bloat', 'reconstruct']);
@@ -24,6 +28,10 @@ const PREVIEW_MAX = 1400;
 export function LiquifyDialog() {
   const layer = store.activeLayer;
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const maskRef = useRef<HTMLCanvasElement>(null);
+  const [showMask, setShowMask] = useState(true);
+  const [hasMask, setHasMask] = useState(false);
+  const selection = store.doc?.selection ?? null;
   const [mode, setMode] = useState<LiquifyMode>('warp');
   const [size, setSize] = useState(() => Math.round(Math.max(20, Math.min(400, (layer?.canvas?.width ?? 1000) / 12))));
   const [pressure, setPressure] = useState(50);
@@ -60,13 +68,49 @@ export function LiquifyDialog() {
     pctx.imageSmoothingQuality = 'high';
     pctx.drawImage(layer.canvas, 0, 0, c.width, c.height);
     const src = pctx.getImageData(0, 0, c.width, c.height);
-    const ctx = c.getContext('2d', { willReadFrequently: true })!;
-    const dst = new ImageData(new Uint8ClampedArray(src.data), c.width, c.height);
+    // The preview works in the layer's space, so dabs are put back unconverted
+    const ctx = c.getContext('2d', { willReadFrequently: true, colorSpace: src.colorSpace })!;
+    const dst = new ImageData(new Uint8ClampedArray(src.data), c.width, c.height, { colorSpace: src.colorSpace });
     ctx.putImageData(dst, 0, 0);
     const mesh = createLiquifyMesh(lw, lh, Math.max(4, Math.round(Math.max(lw, lh) / 300)));
     work.current = { mesh, scale, src, dst, ctx, last: null, held: null, raf: 0 };
+    const m = maskRef.current;
+    if (m) {
+      m.width = mesh.cols;
+      m.height = mesh.rows;
+      // Node (c, r) sits at layer px (c, r) × spacing: the overlay spans cols × spacing layer px
+      m.style.width = `${((mesh.cols * mesh.spacing) / lw) * 100}%`;
+      m.style.height = `${((mesh.rows * mesh.spacing) / lh) * 100}%`;
+    }
     return () => cancelAnimationFrame(work.current?.raf ?? 0);
   }, [layer]);
+
+  const drawMask = () => {
+    const w = work.current;
+    const m = maskRef.current;
+    if (!w || !m) return;
+    m.getContext('2d')!.putImageData(freezeOverlay(w.mesh), 0, 0);
+    setHasMask(w.mesh.freeze.some((v) => v > 0));
+  };
+
+  const maskAll = (how: Parameters<typeof setFreeze>[1]) => {
+    const w = work.current;
+    if (!w) return;
+    setFreeze(w.mesh, how);
+    drawMask();
+  };
+
+  /** Freezes what is selected (doc selection alpha, at the layer's offset). */
+  const freezeSelection = () => {
+    if (!selection || !layer) return;
+    const sc = selection.canvas;
+    const a = ctx2d(sc).getImageData(0, 0, sc.width, sc.height).data;
+    maskAll((x, y) => {
+      const dx = Math.round(layer.x + x);
+      const dy = Math.round(layer.y + y);
+      return dx < 0 || dy < 0 || dx >= sc.width || dy >= sc.height ? 0 : a[(dy * sc.width + dx) * 4 + 3] / 255;
+    });
+  };
 
   const close = () => store.set({ dialog: null });
 
@@ -77,6 +121,7 @@ export function LiquifyDialog() {
     const { mode: m, size: sz, pressure: p } = opts.current;
     const radius = sz / 2;
     applyLiquifyStroke(w.mesh, m, x, y, from.x, from.y, radius, p / 100);
+    if (MASKING.has(m)) return drawMask();
     const pad = radius + 2 + Math.abs(x - from.x) + Math.abs(y - from.y);
     const r = { x0: (Math.min(x, from.x) - pad) * w.scale, y0: (Math.min(y, from.y) - pad) * w.scale, x1: (Math.max(x, from.x) + pad) * w.scale, y1: (Math.max(y, from.y) + pad) * w.scale };
     renderLiquifyPreview(w.src, w.dst, w.mesh, w.scale, r);
@@ -107,6 +152,7 @@ export function LiquifyDialog() {
     const p = toLayer(e);
     w.last = p;
     w.held = p;
+    if (MASKING.has(opts.current.mode)) dab(p.x, p.y, p); // A click paints a spot of mask
     w.raf = requestAnimationFrame(holdLoop);
   };
 
@@ -207,6 +253,7 @@ export function LiquifyDialog() {
                 onPointerCancel={up}
                 onPointerLeave={() => setBrush(null)}
               />
+              <canvas ref={maskRef} className="liquify-mask" data-liquify-mask style={{ display: showMask ? undefined : 'none' }} />
               {ring && <div className="liquify-ring" style={{ left: ring.left, top: ring.top, width: ring.width }} />}
             </div>
           </div>
@@ -217,8 +264,22 @@ export function LiquifyDialog() {
             <button className="btn ghost" onClick={restoreAll} disabled={!edited}>
               Restore All
             </button>
+            <div className="liquify-mask-tools">
+              <label className="hint">
+                <input type="checkbox" checked={showMask} onChange={(e) => setShowMask(e.target.checked)} /> Show mask
+              </label>
+              <button className="btn ghost" data-mask-action="selection" onClick={freezeSelection} disabled={!selection} title="Freeze everything inside the selection">
+                Freeze Selection
+              </button>
+              <button className="btn ghost" data-mask-action="invert" onClick={() => maskAll('invert')} title="Frozen becomes free and free becomes frozen">
+                Invert Mask
+              </button>
+              <button className="btn ghost" data-mask-action="clear" onClick={() => maskAll('clear')} disabled={!hasMask}>
+                Thaw All
+              </button>
+            </div>
             <div className="hint">
-              Drag to push pixels. Twirl, Pucker, Bloat and Reconstruct keep working while you hold the brush still. [ and ] change the size.
+              Drag to push pixels. Twirl, Pucker, Bloat and Reconstruct keep working while you hold the brush still. Freeze Mask (F) protects an area from every tool; Thaw Mask (D) frees it. [ and ] change the size.
             </div>
           </div>
         </div>

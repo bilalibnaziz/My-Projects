@@ -1,5 +1,5 @@
 import type { Rect } from './types';
-import { cloneCanvas, createCanvas, ctx2d, intersectRect, roundRectOut, scratch, unionRect } from './canvas';
+import { cloneCanvas, createCanvas, ctx2d, intersectRect, pixelsLike, roundRectOut, scratch, unionRect } from './canvas';
 
 export type BrushKind =
   | 'paint' // brush / pencil / mask paint
@@ -379,7 +379,7 @@ export class Stroke {
     const TW = this.target.canvas.width;
 
     if (p.kind === 'smudge' && !this.carry) {
-      this.carry = new ImageData(new Uint8ClampedArray(d), ex.width, ex.height);
+      this.carry = pixelsLike(this.target.canvas, new Uint8ClampedArray(d), ex.width, ex.height);
     }
 
     for (let py = 0; py < ex.height; py++) {
@@ -509,13 +509,15 @@ export class Stroke {
             break;
           }
           case 'smudge': {
+            // The previous dab's pixels at the same place in its box. Boxes differ by a pixel as the
+            // pointer moves between pixels; requiring equal sizes skipped most dabs (nothing smeared)
             const c = this.carry!;
-            if (c.width !== ex.width || c.height !== ex.height) break;
+            const j = (Math.min(c.height - 1, py) * c.width + Math.min(c.width - 1, px)) * 4;
             const k = w * 0.9;
-            R += (c.data[i] - R) * k;
-            G += (c.data[i + 1] - G) * k;
-            B += (c.data[i + 2] - B) * k;
-            d[i + 3] += (c.data[i + 3] - d[i + 3]) * k;
+            R += (c.data[j] - R) * k;
+            G += (c.data[j + 1] - G) * k;
+            B += (c.data[j + 2] - B) * k;
+            d[i + 3] += (c.data[j + 3] - d[i + 3]) * k;
             break;
           }
         }
@@ -526,7 +528,7 @@ export class Stroke {
     }
     if (p.kind === 'smudge') {
       // Pick up the smeared result for the next dab
-      this.carry = new ImageData(new Uint8ClampedArray(d), ex.width, ex.height);
+      this.carry = pixelsLike(this.target.canvas, new Uint8ClampedArray(d), ex.width, ex.height);
     }
     ctx.putImageData(img, ex.x, ex.y);
   }

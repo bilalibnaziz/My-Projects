@@ -7,6 +7,8 @@
 
 export type BlendMode =
   | 'normal'
+  /** Groups only: the contents blend with what's below the group, as if not grouped (Photoshop's default). */
+  | 'pass-through'
   | 'dissolve'
   | 'linear-burn'
   | 'darker-color'
@@ -35,6 +37,9 @@ export type BlendMode =
   | 'luminosity';
 
 /** Photoshop's full list, in its order; `sep` starts a new group in the menu. */
+/** The extra mode groups have, listed first for them. */
+export const PASS_THROUGH: { id: BlendMode; label: string } = { id: 'pass-through', label: 'Pass Through' };
+
 export const BLEND_MODES: { id: BlendMode; label: string; sep?: boolean }[] = [
   { id: 'normal', label: 'Normal' },
   { id: 'dissolve', label: 'Dissolve' },
@@ -70,6 +75,8 @@ import type { TextWarpStyle } from './warp';
 import type { WidthPoint } from './strokeProfile';
 
 export type LayerKind = 'raster' | 'adjustment' | 'text' | 'shape' | 'group';
+
+export type BitDepth = 8 | 16 | 32;
 
 export interface CurvePoint {
   x: number; // 0..255
@@ -335,6 +342,7 @@ export interface Layer {
   width: number;
   height: number;
   canvas?: HTMLCanvasElement; // raster pixels
+  pixels?: import('./pixels').PixelBuffer; // high-bit-depth pixel buffer (8 | 16 | 32f)
   mask?: Mask;
   adjust?: Adjust;
   adjustLabel?: string;
@@ -510,6 +518,12 @@ export interface Snapshot {
   selection: Selection | null;
   /** Layout grids at this step. */
   grids?: GridSpec[];
+  /** Working colour space at this step (undo of a conversion restores it). */
+  colorSpace?: 'srgb' | 'display-p3';
+  /** Color mode at this step (RGB or CMYK). Default 'rgb'. */
+  colorMode?: 'rgb' | 'cmyk';
+  /** Bit depth at this step (undo of a conversion restores it). */
+  depth?: BitDepth;
   time: number;
 }
 
@@ -535,6 +549,12 @@ export interface Doc {
   samplers?: { x: number; y: number }[];
   /** Layout grids over the canvas (columns, safe areas, panels …). */
   grids?: GridSpec[];
+  /** Working colour space (default sRGB); its canvases are made in it. See canvas.ts. */
+  colorSpace?: 'srgb' | 'display-p3';
+  /** Document color mode ('rgb' or 'cmyk'). Default 'rgb'. */
+  colorMode?: 'rgb' | 'cmyk';
+  /** Bit depth per channel (8, 16, or 32-bit float). Default 8. */
+  depth?: BitDepth;
 }
 
 let layerVersion = 1;

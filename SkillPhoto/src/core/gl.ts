@@ -3,8 +3,9 @@
 
 import type { Adjust } from './types';
 import { HSL_BANDS, SEL_RANGES, defaultAdjust } from './types';
-import { toneLut } from './curves';
+import { toneLutF, TONE_LUT_SIZE } from './curves';
 import { decodeLut } from './lut';
+import { spaceOf } from './canvas';
 
 const VERT = `#version 300 es
 in vec2 a_pos;
@@ -51,6 +52,8 @@ uniform highp sampler3D u_lut3;
 uniform float u_lutAmount, u_lutSize;
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+const float LUT_N = 1024.0;
+uniform float u_dither;
 const float CENTERS[8] = float[8](0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 275.0, 315.0);
 
 vec3 rgb2hsv(vec3 c) {
@@ -191,9 +194,9 @@ void main() {
 
   // Levels + curves
   if (u_useLut > 0.5) {
-    c.r = texture(u_lut, vec2((c.r * 255.0 + 0.5) / 256.0, 0.5)).r;
-    c.g = texture(u_lut, vec2((c.g * 255.0 + 0.5) / 256.0, 0.5)).g;
-    c.b = texture(u_lut, vec2((c.b * 255.0 + 0.5) / 256.0, 0.5)).b;
+    c.r = texture(u_lut, vec2((clamp(c.r, 0.0, 1.0) * (LUT_N - 1.0) + 0.5) / LUT_N, 0.5)).r;
+    c.g = texture(u_lut, vec2((clamp(c.g, 0.0, 1.0) * (LUT_N - 1.0) + 0.5) / LUT_N, 0.5)).g;
+    c.b = texture(u_lut, vec2((clamp(c.b, 0.0, 1.0) * (LUT_N - 1.0) + 0.5) / LUT_N, 0.5)).b;
   }
 
   // Color balance: per tonal range, shifts along the cyan-red, magenta-green, yellow-blue axes
@@ -288,6 +291,12 @@ void main() {
   }
   if (u_fade > 0.0) c = mix(c, vec3(0.09) + c * 0.84, u_fade);
 
+  // Dither (triangular, ±1 level) where the adjustment changed the pixel: the 8-bit result keeps the
+  // in-between tones as fine noise instead of banding. Untouched pixels stay exact.
+  if (u_dither > 0.5 && any(greaterThan(abs(c - src.rgb), vec3(0.5 / 255.0)))) {
+    vec2 q = gl_FragCoord.xy;
+    c += (hash(q) + hash(q + vec2(37.1, 91.7)) - 1.0) / 255.0;
+  }
   outColor = vec4(clamp(c, 0.0, 1.0), src.a);
 }`;
 
@@ -324,6 +333,12 @@ export function wbMultipliers(temp: number, tint: number): [number, number, numb
   b = Math.max(0.2, b);
   const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
   return [r / lum, g / lum, b / lum];
+}
+
+/** Dither adjusted pixels (on by default; tests and pixel-exact tools can switch it off). */
+let adjustDither = true;
+export function setAdjustDither(on: boolean) {
+  adjustDither = on;
 }
 
 class AdjustEngine {
@@ -437,6 +452,15 @@ class AdjustEngine {
   process(src: HTMLCanvasElement, adj: Adjust, srcKey: string | null): HTMLCanvasElement {
     const gl = this.gl;
     const { width, height } = src;
+    // Work in the source's colour space: uploads would otherwise be converted to sRGB (clipping a P3
+    // photo) and the result read back as sRGB
+    const space = spaceOf(src);
+    const cs = gl as WebGL2RenderingContext & { unpackColorSpace?: PredefinedColorSpace; drawingBufferColorSpace?: PredefinedColorSpace };
+    if ('drawingBufferColorSpace' in cs && cs.drawingBufferColorSpace !== space) {
+      cs.drawingBufferColorSpace = space;
+      cs.unpackColorSpace = space;
+      this.lastSrcKey = null;
+    }
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.canvas.width = width;
       this.canvas.height = height;
@@ -455,12 +479,21 @@ class AdjustEngine {
       this.lastSrcKey = srcKey;
     }
 
+    this.setUniforms(adj, width, height, adjustDither);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    return this.canvas;
+  }
+
+  /** Uploads every uniform of the adjustment stack (shared by the 8-bit and float paths). */
+  private setUniforms(adj: Adjust, width: number, height: number, dither: boolean) {
+    const gl = this.gl;
     const lutKey = JSON.stringify([adj.levels, adj.curves]);
     const useLut = lutKey !== IDENTITY_LUT_KEY;
     if (useLut && lutKey !== this.lastLutKey) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, toneLut(adj));
+      // Half-float, 1024 steps: Levels + Curves without 8-bit stair-steps
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, TONE_LUT_SIZE, 1, 0, gl.RGBA, gl.FLOAT, toneLutF(adj));
       this.lastLutKey = lutKey;
     }
     gl.activeTexture(gl.TEXTURE1);
@@ -490,6 +523,7 @@ class AdjustEngine {
     f('u_threshold', adj.threshold > 0 ? adj.threshold / 255 : 0);
     f('u_posterize', adj.posterize);
     f('u_useLut', useLut ? 1 : 0);
+    f('u_dither', dither ? 1 : 0);
     const hsl = new Float32Array(24);
     HSL_BANDS.forEach((b, i) => {
       hsl[i * 3] = adj.hsl[b].h / 100;
@@ -555,9 +589,70 @@ class AdjustEngine {
       f('u_lutSize', lut.size);
     } else f('u_lutAmount', 0);
 
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    return this.canvas;
   }
+
+  private fTex: WebGLTexture | null = null;
+  private fOut: WebGLTexture | null = null;
+  private fbo: WebGLFramebuffer | null = null;
+
+  /**
+   * The same adjustment stack on float pixels (RGBA, straight alpha, 0..1, rows top to bottom): for 16- and
+   * 32-bit documents. Renders into an RGBA32F framebuffer and reads floats back, so nothing is rounded to 8 bits.
+   * Returns null when the GPU can't render to float (EXT_color_buffer_float missing).
+   */
+  processFloat(data: Float32Array, width: number, height: number, adj: Adjust): Float32Array | null {
+    const gl = this.gl;
+    if (!gl.getExtension('EXT_color_buffer_float')) return null;
+    const linear = !!gl.getExtension('OES_texture_float_linear');
+    const mk = () => {
+      const tx = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, tx);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return tx;
+    };
+    gl.activeTexture(gl.TEXTURE0);
+    if (!this.fTex) this.fTex = mk();
+    gl.bindTexture(gl.TEXTURE_2D, this.fTex);
+    // RGBA32F keeps 16-bit precision (half floats only have 11 bits); mipmaps (clarity / dehaze) need linear float filtering
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, linear ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, linear ? gl.LINEAR : gl.NEAREST);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, data);
+    if (linear) gl.generateMipmap(gl.TEXTURE_2D);
+    if (!this.fOut) this.fOut = mk();
+    gl.bindTexture(gl.TEXTURE_2D, this.fOut);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, null);
+    if (!this.fbo) this.fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.fOut, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return null;
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.fTex);
+    gl.viewport(0, 0, width, height);
+    gl.useProgram(this.prog);
+    this.setUniforms(adj, width, height, false);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    const raw = new Float32Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, raw);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // The 8-bit path's source texture is no longer bound: force a re-upload next time
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.srcTex);
+    this.lastSrcKey = null;
+    // The framebuffer's first row is the image's bottom row (the shader draws the top at +y)
+    const out = new Float32Array(raw.length);
+    const row = width * 4;
+    for (let y = 0; y < height; y++) out.set(raw.subarray((height - 1 - y) * row, (height - y) * row), y * row);
+    return out;
+  }
+
 }
 
 const IDENTITY_LUT_KEY = (() => {

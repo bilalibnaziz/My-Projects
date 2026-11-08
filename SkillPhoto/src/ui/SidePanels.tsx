@@ -499,6 +499,7 @@ export function InfoPanel() {
       <div className="mini-title">Document &amp; Technical Info</div>
       <div className="info-grid two mono">
         <span>Canvas</span><span>{doc.width} × {doc.height} px</span>
+        <span>Colour</span><span>{doc.colorSpace === 'display-p3' ? 'Display P3' : 'sRGB'}</span>
         <span>Resolution</span><span>{((doc.width * doc.height) / 1e6).toFixed(2)} MP · {(() => {
           const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
           const g = gcd(doc.width, doc.height);

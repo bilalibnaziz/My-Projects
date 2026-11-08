@@ -9,6 +9,10 @@ export interface RasterRGBA {
   width: number;
   height: number;
   data: Uint8ClampedArray;
+  /** 16-bit gray / RGB(A) files: the full samples, RGBA 0..65535. */
+  data16?: Uint16Array;
+  /** Embedded ICC profile (tag 34675), if any. */
+  icc?: Uint8Array;
 }
 
 const MAX_SIDE = 30000;
@@ -168,6 +172,12 @@ export async function decodeTiff(buffer: ArrayBuffer): Promise<RasterRGBA> {
       for (let r = 0; r < (tiled ? th : blockRows); r++) {
         const base = r * rowBytes;
         if (bps === 8) for (let i = bpp; i < rowBytes; i++) block[base + i] = (block[base + i] + block[base + i - bpp]) & 255;
+        else {
+          // 16-bit horizontal differencing works on whole samples
+          const rd = (i: number) => (le ? block[base + i] | (block[base + i + 1] << 8) : (block[base + i] << 8) | block[base + i + 1]);
+          const wr = (i: number, v: number) => { if (le) { block[base + i] = v & 255; block[base + i + 1] = v >> 8; } else { block[base + i] = v >> 8; block[base + i + 1] = v & 255; } };
+          for (let i = bpp; i < rowBytes; i += 2) wr(i, (rd(i) + rd(i - bpp)) & 0xffff);
+        }
       }
     }
     const bx = tiled ? (s % across) * tw : 0;
@@ -222,7 +232,76 @@ export async function decodeTiff(buffer: ArrayBuffer): Promise<RasterRGBA> {
     out[o + 2] = bl;
     out[o + 3] = a;
   }
-  return { width, height, data: out };
+  // Full 16-bit samples for gray and RGB(A)
+  let data16: Uint16Array | undefined;
+  if (bps === 16 && (photometric === 0 || photometric === 1 || photometric === 2)) {
+    data16 = new Uint16Array(width * height * 4);
+    const s16 = (i: number) => (le ? raw[i * 2] | (raw[i * 2 + 1] << 8) : (raw[i * 2] << 8) | raw[i * 2 + 1]);
+    for (let p = 0; p < width * height; p++) {
+      const b = p * spp, o = p * 4;
+      if (photometric !== 2) {
+        let v = s16(b);
+        if (photometric === 0) v = 65535 - v;
+        data16[o] = data16[o + 1] = data16[o + 2] = v;
+        data16[o + 3] = spp > 1 ? s16(b + 1) : 65535;
+      } else {
+        let r = s16(b), g = s16(b + 1), bl = s16(b + 2);
+        const a = spp > 3 ? s16(b + 3) : 65535;
+        if (spp > 3 && extra === 1 && a > 0 && a < 65535) {
+          r = Math.round((r * 65535) / a);
+          g = Math.round((g * 65535) / a);
+          bl = Math.round((bl * 65535) / a);
+        }
+        data16[o] = Math.min(65535, r); data16[o + 1] = Math.min(65535, g); data16[o + 2] = Math.min(65535, bl); data16[o + 3] = a;
+      }
+    }
+  }
+  const iccTag = ifd.get(34675);
+  return { width, height, data: out, data16, icc: iccTag && iccTag.length > 128 ? Uint8Array.from(iccTag) : undefined };
+}
+
+/** Uncompressed RGBA 16-bit TIFF (unassociated alpha), little endian. */
+export function encodeTiff16(width: number, height: number, data: Uint16Array, dpi = 72, icc?: Uint8Array): Uint8Array {
+  const tags: [number, number, number, number[]][] = [
+    [256, 4, 1, [width]], [257, 4, 1, [height]], [258, 3, 4, [16, 16, 16, 16]], [259, 3, 1, [1]], [262, 3, 1, [2]],
+    [273, 4, 1, [0]], [277, 3, 1, [4]], [278, 4, 1, [height]], [279, 4, 1, [data.length * 2]],
+    [282, 5, 1, [dpi]], [283, 5, 1, [dpi]], [284, 3, 1, [1]], [296, 3, 1, [2]], [338, 3, 1, [2]],
+  ];
+  if (icc) tags.push([34675, 7, icc.length, [0]]); // ICC profile, stored after the pixels
+  const ifdSize = 2 + tags.length * 12 + 4;
+  const extraAt = 8 + ifdSize, dataAt = extraAt + 8 + 16;
+  const iccAt = dataAt + data.length * 2;
+  const buf = new ArrayBuffer(iccAt + (icc ? icc.length : 0));
+  const dv = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+  u8[0] = u8[1] = 0x49;
+  dv.setUint16(2, 42, true);
+  dv.setUint32(4, 8, true);
+  dv.setUint16(8, tags.length, true);
+  let extra = extraAt;
+  tags.forEach(([tag, type, count, vals], k) => {
+    const e = 10 + k * 12;
+    dv.setUint16(e, tag, true);
+    dv.setUint16(e + 2, type, true);
+    dv.setUint32(e + 4, count, true);
+    if (tag === 273) dv.setUint32(e + 8, dataAt, true);
+    else if (tag === 34675) dv.setUint32(e + 8, iccAt, true);
+    else if (type === 5) {
+      dv.setUint32(e + 8, extra, true);
+      dv.setUint32(extra, vals[0], true);
+      dv.setUint32(extra + 4, 1, true);
+      extra += 8;
+    } else if (count === 4 && type === 3) {
+      dv.setUint32(e + 8, extra, true);
+      vals.forEach((v, i) => dv.setUint16(extra + i * 2, v, true));
+      extra += 8;
+    } else if (type === 3) dv.setUint16(e + 8, vals[0], true);
+    else dv.setUint32(e + 8, vals[0], true);
+  });
+  dv.setUint32(10 + tags.length * 12, 0, true);
+  for (let i = 0; i < data.length; i++) dv.setUint16(dataAt + i * 2, data[i], true);
+  if (icc) u8.set(icc, iccAt);
+  return u8;
 }
 
 // ---------------------------------------------------------------- writing
@@ -230,10 +309,13 @@ export async function decodeTiff(buffer: ArrayBuffer): Promise<RasterRGBA> {
 /**
  * Uncompressed baseline TIFF. `cmyk` writes a print-ready separated image (colour-managed
  * separation; alpha is flattened onto white); otherwise RGBA with unassociated alpha.
+ * `icc` embeds the profile (tag 34675) in RGB files; CMYK files never carry it — the working
+ * profile is RGB and would mis-tag the separation (a CMYK profile is still open).
  */
-export function encodeTiff(img: RasterRGBA, opts: { cmyk?: boolean; dpi?: number } = {}): Uint8Array {
+export function encodeTiff(img: RasterRGBA, opts: { cmyk?: boolean; dpi?: number; icc?: Uint8Array } = {}): Uint8Array {
   const { width: w, height: h, data } = img;
   const cmyk = !!opts.cmyk;
+  const icc = cmyk ? undefined : opts.icc;
   const spp = 4;
   const pixels = new Uint8Array(w * h * spp);
   // Separation is costly: cache per colour
@@ -276,12 +358,14 @@ export function encodeTiff(img: RasterRGBA, opts: { cmyk?: boolean; dpi?: number
   if (cmyk) tags.push([332, 3, 1, [1]]);
   else tags.push([338, 3, 1, [2]]);
   tags.sort((a, b) => a[0] - b[0]);
+  if (icc) tags.push([34675, 7, icc.length, [0]]); // ICC profile, stored after the pixels
   const ifdSize = 2 + tags.length * 12 + 4;
   const extraAt = 8 + ifdSize;
   // Out-of-line values: BitsPerSample (8 bytes) and the two rationals (16 bytes)
   const extraSize = 8 + 16;
   const dataAt = extraAt + extraSize;
-  const buf = new ArrayBuffer(dataAt + pixels.length);
+  const iccAt = dataAt + pixels.length;
+  const buf = new ArrayBuffer(iccAt + (icc ? icc.length : 0));
   const dv = new DataView(buf);
   const u8 = new Uint8Array(buf);
   u8[0] = 0x49;
@@ -296,6 +380,7 @@ export function encodeTiff(img: RasterRGBA, opts: { cmyk?: boolean; dpi?: number
     dv.setUint16(e + 2, type, true);
     dv.setUint32(e + 4, count, true);
     if (tag === 273) dv.setUint32(e + 8, dataAt, true);
+    else if (tag === 34675) dv.setUint32(e + 8, iccAt, true);
     else if (type === 5) {
       dv.setUint32(e + 8, extra, true);
       dv.setUint32(extra, Math.round(vals[0] * 1000), true);
@@ -310,5 +395,6 @@ export function encodeTiff(img: RasterRGBA, opts: { cmyk?: boolean; dpi?: number
   });
   dv.setUint32(10 + tags.length * 12, 0, true);
   u8.set(pixels, dataAt);
+  if (icc) u8.set(icc, iccAt);
   return u8;
 }

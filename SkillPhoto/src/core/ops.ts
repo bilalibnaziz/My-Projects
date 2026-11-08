@@ -1,11 +1,14 @@
 import { frameVisible } from './objectTransform';
-import type { Adjust, Doc, Layer, Rect, Selection, SmartFilter } from './types';
+import type { Adjust, BitDepth, Doc, Layer, Rect, Selection, SmartFilter } from './types';
 import { defaultAdjust, makeLayer, withLayer, uid } from './types';
-import { alphaBounds, blurImageData, cloneCanvas, createCanvas, ctx2d, intersectRect, touch } from './canvas';
+import { PixelBuffer } from './pixels';
+import { FLOAT_FILTERS, floatFilter, limitToSelection, withBuffer } from './hibit';
+import { alphaBounds, blurImageData, cloneCanvas, convertCanvas, createCanvas, ctx2d, intersectRect, touch, spaceOf, pixelsLike, workingSpace, type ColorSpaceId } from './canvas';
 import { layerSurface, renderDocument, syncTextBounds } from './render';
 import * as sel from './selection';
 import { store } from './store';
-import { applyFilterOffThread } from './filterThread';
+import { applyFilterOffThread, contentAwareScaleOffThread } from './filterThread';
+import { mapIntoRect, rectifiedSize, rectify } from './perspectiveCrop';
 import type { TransformState } from './store';
 import { contentAwareFill } from './fill';
 import { filterById } from './filters';
@@ -16,6 +19,7 @@ import { renderTransformed, transformMatrix } from './transform';
 import { record } from './actions';
 import { rerenderSmart, replaceSmartSource, smartFromPixels, smartGeometry } from './smart';
 import { harmonizeLayerColor } from './colorHarmonizer';
+import { proofRgb } from './color';
 import { renderMockup, type MockupPresetId, MOCKUP_PRESETS } from './mockupEngine';
 
 const need = (): Doc | null => store.doc;
@@ -203,7 +207,7 @@ export function newGroup() {
   const doc = need();
   if (!doc) return;
   const n = doc.layers.filter((l) => isGroup(l)).length + 1;
-  store.insertLayer(makeLayer({ kind: 'group', name: `Group ${n}` }), undefined, 'New Group');
+  store.insertLayer(makeLayer({ kind: 'group', name: `Group ${n}`, blend: 'pass-through' }), undefined, 'New Group');
 }
 
 /** Ungroup (⇧⌘G): removes the active group (or the group the active layer is in). */
@@ -304,6 +308,113 @@ export function mergeVisible() {
   const merged = makeLayer({ kind: 'raster', name: 'Merged', canvas, width: doc.width, height: doc.height });
   const layers = [...doc.layers.filter((l) => !l.visible), merged];
   store.commit('Merge Visible', { layers, activeId: merged.id }, { icon: 'merge' });
+}
+
+/**
+ * Image ▸ Color Space: redraws every pixel layer, smart object source and mask in the other space (the
+ * browser converts the colours). sRGB → Display P3 loses nothing; Display P3 → sRGB clips colours sRGB
+ * can't show. Text, shapes and adjustments are redrawn from their settings. One undo step.
+ */
+export function convertColorSpace(target: ColorSpaceId) {
+  const doc = need();
+  if (!doc) return;
+  if ((doc.colorSpace ?? 'srgb') === target) return store.toast(`Already ${target === 'srgb' ? 'sRGB' : 'Display P3'}`);
+  const layers = doc.layers.map((l) => {
+    const patch: Partial<Layer> = {};
+    if (l.canvas) patch.canvas = convertCanvas(l.canvas, target);
+    if (l.smart) patch.smart = { ...l.smart, source: convertCanvas(l.smart.source, target) };
+    if (l.mask) patch.mask = { ...l.mask, canvas: convertCanvas(l.mask.canvas, target) };
+    return Object.keys(patch).length ? withLayer(l, patch) : l;
+  });
+  doc.colorSpace = target === 'srgb' ? undefined : target;
+  store.invalidateRender();
+  store.commit(target === 'srgb' ? 'Convert to sRGB' : 'Convert to Display P3', { layers }, { icon: 'layer' });
+  store.toast(target === 'srgb' ? 'Converted to sRGB (colours outside sRGB were clipped)' : 'Working in Display P3: wide-gamut colours are kept and exports carry the P3 profile');
+}
+
+/**
+ * Image ▸ Mode: converts document color mode (RGB Color vs CMYK Color).
+ * In CMYK mode, document layers are separated and gamut-mapped for offset print inks,
+ * soft-proof is enabled by default, and exports write true CMYK separations.
+ * One undo step.
+ */
+export function convertColorMode(target: 'rgb' | 'cmyk') {
+  const doc = need();
+  if (!doc) return;
+  const current = doc.colorMode ?? 'rgb';
+  if (current === target) return store.toast(`Already ${target.toUpperCase()} Color`);
+
+  const layers = doc.layers.map((l) => {
+    if (!l.canvas || target !== 'cmyk') return l;
+    const w = l.canvas.width, h = l.canvas.height;
+    const ctx = ctx2d(l.canvas);
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] === 0) continue;
+      const pr = proofRgb([d[i], d[i + 1], d[i + 2]]);
+      d[i] = pr[0];
+      d[i + 1] = pr[1];
+      d[i + 2] = pr[2];
+    }
+    const c = createCanvas(w, h, spaceOf(l.canvas));
+    ctx2d(c).putImageData(img, 0, 0);
+    return withLayer(l, { canvas: c });
+  });
+
+  doc.colorMode = target === 'rgb' ? undefined : 'cmyk';
+  if (target === 'cmyk') store.set({ proof: 'cmyk' });
+  else if (store.state.proof === 'cmyk') store.set({ proof: 'off' });
+  store.invalidateRender();
+  store.commit(target === 'cmyk' ? 'Convert to CMYK Color' : 'Convert to RGB Color', { layers }, { icon: 'layer' });
+  store.toast(target === 'cmyk' ? 'Converted to CMYK Color (print separation mode, soft-proof enabled)' : 'Converted to RGB Color');
+}
+
+/** True when the buffer, shown at 8 bits, is the canvas's exact pixels (no edit since it was made). */
+function bufferMatchesCanvas(pb: PixelBuffer, canvas: HTMLCanvasElement): boolean {
+  if (pb.width !== canvas.width || pb.height !== canvas.height) return false;
+  const a = pb.toImageData(false, spaceOf(canvas)).data;
+  const b = ctx2d(canvas).getImageData(0, 0, canvas.width, canvas.height).data;
+  for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 1) return false;
+  return true;
+}
+
+/**
+ * Image ▸ Mode: converts document bit depth (8, 16, or 32 Bits per Channel).
+ * Converts raster layers' PixelBuffers and updates display canvases with dithering when reducing depth.
+ * One undo step.
+ */
+export function convertBitDepth(target: BitDepth, dither = true) {
+  const doc = need();
+  if (!doc) return;
+  const current = doc.depth ?? 8;
+  if (current === target) return store.toast(`Already ${target} Bits/Channel`);
+
+  const layers = doc.layers.map((l) => {
+    if (!l.canvas && !l.pixels) return l;
+    // The high-bit buffer is only trusted while the layer still shows exactly what it holds: paint, filters
+    // and adjustments still edit the 8-bit canvas, and an edited canvas must win (or those edits are lost)
+    let pb = l.pixels && l.canvas && !bufferMatchesCanvas(l.pixels, l.canvas) ? undefined : l.pixels;
+    if (!pb && l.canvas) {
+      pb = PixelBuffer.fromCanvas(l.canvas, current);
+    }
+    if (pb) {
+      const converted = pb.convert(target, dither);
+      const canvas = converted.toCanvas(l.canvas ? spaceOf(l.canvas) : workingSpace(), dither);
+      return withLayer(l, { pixels: converted, canvas });
+    }
+    return l;
+  });
+
+  doc.depth = target;
+  store.invalidateRender();
+  const label = `Convert to ${target} Bits/Channel`;
+  store.commit(label, { layers, depth: target }, { icon: 'layer' });
+  store.toast(
+    target > 8
+      ? `Layers stored at ${target} bits per channel. Painting, filters and adjustments still render at 8 bits for now.`
+      : 'Converted to 8 bits per channel'
+  );
 }
 
 export function flattenImage() {
@@ -971,6 +1082,91 @@ export function crop(rect: Rect, deletePixels: boolean) {
   doc.view.fitted = false;
 }
 
+/**
+ * Image ▸ Perspective Crop: straightens the plane under `quad` (doc space, nw ne se sw) into a
+ * rectangle. Pixel layers and masks are resampled through the homography; text and shapes keep
+ * their geometry and move to where their centre lands; adjustments cover the new canvas.
+ */
+export function perspectiveCrop(quad: { x: number; y: number }[], size = rectifiedSize(quad)) {
+  const doc = need();
+  if (!doc) return;
+  const { width: W, height: H } = size;
+  const warpCanvas = (c: HTMLCanvasElement, ox: number, oy: number) => {
+    const px = ctx2d(c).getImageData(0, 0, c.width, c.height).data;
+    const out = createCanvas(W, H, spaceOf(c));
+    ctx2d(out).putImageData(pixelsLike(c, rectify(px, c.width, c.height, ox, oy, quad, W, H) as Uint8ClampedArray, W, H), 0, 0);
+    return out;
+  };
+  const layers = doc.layers.map((l) => {
+    const patch: Partial<Layer> = {};
+    if (l.mask) patch.mask = { ...l.mask, canvas: warpCanvas(l.mask.canvas, l.mask.x, l.mask.y), x: 0, y: 0 };
+    if (l.kind === 'adjustment') Object.assign(patch, { x: 0, y: 0, width: W, height: H });
+    else if (l.kind === 'raster' && l.canvas && !l.text && !l.shape) Object.assign(patch, { canvas: warpCanvas(l.canvas, l.x, l.y), x: 0, y: 0, width: W, height: H, smart: undefined });
+    else if (l.width && l.height) {
+      const c = mapIntoRect(quad, W, H, { x: l.x + l.width / 2, y: l.y + l.height / 2 });
+      Object.assign(patch, { x: c.x - l.width / 2, y: c.y - l.height / 2 });
+    }
+    return withLayer(l, patch);
+  });
+  store.invalidateRender();
+  store.commit('Perspective Crop', { layers, width: W, height: H, selection: null }, { icon: 'crop' });
+  doc.view.fitted = false;
+}
+
+export interface ContentAwareScaleOptions {
+  /** 0–100: share of the change made by seams (the rest is plain scaling). */
+  amount: number;
+  /** Keep the selected area's shape. */
+  protectSelection: boolean;
+  protectSkin: boolean;
+}
+
+/**
+ * Edit ▸ Content-Aware Scale: resizes the active pixel layer to tw × th by removing or adding
+ * low-detail seams. A full-canvas layer (a photo) resizes the canvas with it.
+ */
+export async function contentAwareScale(tw: number, th: number, o: ContentAwareScaleOptions): Promise<void> {
+  const doc = need();
+  const layer = store.activeLayer;
+  if (!doc || !layer) return;
+  if (layer.kind !== 'raster' || !layer.canvas || layer.text || layer.shape) return store.toast('Content-Aware Scale works on a pixel layer', 'error');
+  const c = layer.canvas;
+  const full = layer.x === 0 && layer.y === 0 && c.width === doc.width && c.height === doc.height;
+  let protect: Float32Array | undefined;
+  if (o.protectSelection && doc.selection) {
+    // Selection alpha under each layer pixel
+    const s = ctx2d(doc.selection.canvas).getImageData(0, 0, doc.width, doc.height).data;
+    protect = new Float32Array(c.width * c.height);
+    for (let y = 0; y < c.height; y++) {
+      const dy = Math.round(layer.y) + y;
+      if (dy < 0 || dy >= doc.height) continue;
+      for (let x = 0; x < c.width; x++) {
+        const dx = Math.round(layer.x) + x;
+        if (dx >= 0 && dx < doc.width) protect[y * c.width + x] = s[(dy * doc.width + dx) * 4 + 3] / 255;
+      }
+    }
+  }
+  const img = ctx2d(c).getImageData(0, 0, c.width, c.height);
+  await store.task('Content-Aware Scale', async () => {
+    const out = await contentAwareScaleOffThread(img, tw, th, { amount: o.amount / 100, protect, protectSkin: o.protectSkin });
+    if (store.doc !== doc || !doc.layers.includes(layer)) return store.toast('Content-Aware Scale skipped: the layer changed while it ran', 'error');
+    const canvas = createCanvas(out.width, out.height);
+    ctx2d(canvas).putImageData(out, 0, 0);
+    // A full-canvas photo takes the canvas with it; other layers keep their centre
+    const x = full ? 0 : layer.x + (c.width - out.width) / 2;
+    const y = full ? 0 : layer.y + (c.height - out.height) / 2;
+    const scaled = withLayer(layer, { canvas, x, y, width: out.width, height: out.height, smart: undefined });
+    let layers = store.replaceLayer(scaled);
+    if (full) layers = layers.map((l) => (l.kind === 'adjustment' ? withLayer(l, { x: 0, y: 0, width: out.width, height: out.height }) : l));
+    record({ kind: 'contentAwareScale', width: tw, height: th, opts: { ...o }, label: `Content-Aware Scale ${tw} × ${th}` });
+    // An open crop box belongs to the old canvas size
+    if (full) store.cancelModes();
+    store.invalidateRender();
+    store.commit('Content-Aware Scale', full ? { layers, width: out.width, height: out.height, selection: null } : { layers }, { icon: 'transform' });
+    if (full) doc.view.fitted = false;
+  });
+}
+
 export function cropToSelection() {
   const doc = need();
   if (!doc?.selection) return store.toast('No active selection');
@@ -1402,6 +1598,17 @@ export async function commitFilter(filterId: string, params: Record<string, numb
     setSmartFilters(layer.id, [...layer.smart.filters, { id: filterId, params: { ...params }, enabled: true }], `Smart Filter: ${name}`);
     return;
   }
+  // 16 / 32 bits: these filters work on the layer's buffer in float (no 8-bit rounding)
+  const floatNext = (doc.depth ?? 8) > 8 && FLOAT_FILTERS.has(filterId) && layer.kind === 'raster' && layer.pixels && layer.canvas && !layer.smart ? floatFilter(layer.pixels, filterId, params) : null;
+  if (floatNext && layer.pixels) {
+    let next = floatNext;
+    if (doc.selection) next = limitToSelection(layer.pixels, next, doc.selection.canvas, Math.round(layer.x), Math.round(layer.y));
+    lastFilter = { id: filterId, params: { ...params } };
+    record({ kind: 'filter', id: filterId, params: { ...params }, label: name });
+    store.invalidateRender();
+    store.commit(name, { layers: store.replaceLayer(withBuffer(layer, next)) }, { icon: 'filter' });
+    return;
+  }
   const finish = (out: HTMLCanvasElement | null) => {
     if (!out) return;
     lastFilter = { id: filterId, params: { ...params } };
@@ -1463,7 +1670,7 @@ export async function replaceSmartContents(file: Blob) {
   const layer = store.activeLayer;
   if (!doc || !layer?.smart) return store.toast('Select a Smart Object first');
   const { fileToCanvas } = await import('./io');
-  const img = await fileToCanvas(file);
+  const img = await fileToCanvas(file, workingSpace());
   store.invalidateRender();
   store.commit('Replace Contents', { layers: store.replaceLayer(replaceSmartSource(layer, img)) }, { icon: 'layer' });
 }
@@ -1582,6 +1789,59 @@ export function applyFrequencySeparation(blurRadius = 3) {
     activeId: highLayer.id,
   }, { icon: 'filter' });
   store.toast('Frequency Separation applied', 'success');
+}
+
+// ================================================================ Sky Replacement
+
+/**
+ * Edit ▸ Sky Replacement: the sky (the selection when there is one, else the one Select Sky finds)
+ * replaced by a pass-through "Sky Replacement" group above the top-level active layer: the new sky
+ * masked to the old one, and a soft-light Foreground Lighting layer (pass-through lets the soft light
+ * reach the photo below the group). Nothing below is changed; one undo step.
+ */
+export async function replaceSky(o: import('./skyReplace').SkyOptions) {
+  const doc = need();
+  if (!doc) return;
+  await store.task('Replacing the sky', async () => {
+    const sky = await import('./skyReplace');
+    const { docImage, selectionAlpha } = await import('./smartSelect');
+    const w = doc.width;
+    const h = doc.height;
+    let alpha: Float32Array | null = null;
+    const sel = selectionAlpha();
+    if (sel) alpha = Float32Array.from(sel, (v) => v / 255);
+    else {
+      const img = docImage(true);
+      const { selectSky } = await import('./segment');
+      const r = img && selectSky(img);
+      if (r) alpha = sky.alphaFromRegion(r, w, h);
+    }
+    if (!alpha || !alpha.some((v) => v > 0.5)) {
+      store.toast('No sky found: select the sky first (Select ▸ Sky, or a marquee) and try again', 'error');
+      return;
+    }
+    const parts = sky.buildSky(alpha, w, h, o);
+    const group = makeLayer({ kind: 'group', name: 'Sky Replacement', blend: 'pass-through', x: 0, y: 0, width: w, height: h });
+    const skyLayer = makeLayer({
+      kind: 'raster',
+      name: 'Sky',
+      parent: group.id,
+      canvas: parts.sky,
+      x: 0,
+      y: 0,
+      width: w,
+      height: h,
+      mask: { canvas: sky.maskCanvas(parts.mask, w, h), x: 0, y: 0, enabled: true },
+    });
+    const light = makeLayer({ kind: 'raster', name: 'Foreground Lighting', canvas: parts.light, x: 0, y: 0, width: w, height: h, blend: 'soft-light', opacity: o.lighting / 100, parent: group.id });
+    // Above the active layer when it's top-level (the photo), else at the top
+    const active = doc.layers.find((l) => l.id === doc.activeId);
+    const at = active && !active.parent ? doc.layers.indexOf(active) + 1 : doc.layers.length;
+    const layers = [...doc.layers];
+    layers.splice(at, 0, skyLayer, light, group); // Children sit directly below their group
+    store.commit('Sky Replacement', { layers, activeId: skyLayer.id, selection: null }, { icon: 'layer' });
+    store.toast('Sky replaced · the Sky layer has a mask you can paint; Foreground Lighting is a soft-light layer', 'success');
+  });
 }
 
 // ================================================================ Smart AI & Designer Superpowers

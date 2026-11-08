@@ -1,16 +1,21 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { UiScaleControl } from './Workspace';
 import { currentWorkspace } from './layout';
 import type { ReactNode } from 'react';
+import type { Doc } from '../core/types';
 import { X, Link2, Link2Off, Download } from 'lucide-react';
 import { store, useStore } from '../core/store';
 import * as ops from '../core/ops';
 import * as io from '../core/io';
+import { renderDocument } from '../core/render';
 import type { MultiExportFormatId } from '../core/io';
 import { filterById, defaultParams } from '../core/filters';
 import { renderSmart } from '../core/smart';
+import { contentAwareScale } from '../core/seamCarve';
 import { COMMANDS, MENU_ORDER, extraShortcuts, formatKeys } from '../core/commands';
-import { canvasToBlob, createCanvas, ctx2d, touch } from '../core/canvas';
+import { canvasToBlob, createCanvas, ctx2d, touch, workingSpace } from '../core/canvas';
+import { DEFAULT_SKY, SKY_PRESETS, alphaFromRegion, buildSky, composeSky, type SkyOptions } from '../core/skyReplace';
+import { selectSky as selectSkyRegion } from '../core/segment';
 import { ColorInput, Select, Slider, Toggle } from './widgets';
 import { DOC_PRESETS, SAFE_ZONES, TEMPLATES, newFromTemplate, presetById, safeZoneFor } from '../core/social';
 import type { PresetCategory } from '../core/social';
@@ -222,7 +227,7 @@ function sizeToScale(width: number, docWidth: number) {
 
 function ExportDialog() {
   const doc = store.doc!;
-  const [format, setFormat] = useState<io.ExportFormat | 'psd' | 'tiff' | 'tiff-cmyk' | 'pdf' | 'svg' | 'bmp' | 'ico'>('jpeg');
+  const [format, setFormat] = useState<io.ExportFormat | 'psd' | 'tiff' | 'tiff-cmyk' | 'pdf' | 'svg' | 'bmp' | 'ico' | 'png16' | 'tiff16'>('jpeg');
   const [lossless, setLossless] = useState(false);
   const extra = !['jpeg', 'png', 'webp', 'psd'].includes(format);
   const [quality, setQuality] = useState(90);
@@ -295,6 +300,8 @@ function ExportDialog() {
     }
     if (format === 'psd') await store.task('Writing PSD', () => io.exportPsd(doc));
     else if (format === 'tiff' || format === 'tiff-cmyk') await store.task('Writing TIFF', () => io.exportTiff(doc, format === 'tiff-cmyk'));
+    else if (format === 'png16') await store.task('Writing 16-bit PNG', () => io.exportHighBit(doc, 'png'));
+    else if (format === 'tiff16') await store.task('Writing 16-bit TIFF', () => io.exportHighBit(doc, 'tiff'));
     else if (format === 'pdf') await store.task('Writing PDF', () => io.exportPdf(doc, { lossless, quality: quality / 100 }));
     else if (format === 'svg') await store.task('Writing SVG', () => io.exportSvg(doc));
     else if (format === 'bmp') await store.task('Writing BMP', () => io.exportBmp(doc));
@@ -326,7 +333,7 @@ function ExportDialog() {
         <div className="export-preview">{preview && <img src={preview} alt="Export preview" />}</div>
         <div className="export-side">
           <Field label="Format">
-            <Select value={format} onChange={setFormat} options={[{ value: 'jpeg', label: 'JPEG' }, { value: 'png', label: 'PNG (lossless, transparency)' }, { value: 'webp', label: 'WebP' }, { value: 'psd', label: 'Photoshop PSD (layers, groups, styles)' }, { value: 'pdf', label: 'PDF' }, { value: 'svg', label: 'SVG (shapes & text stay vector)' }, { value: 'tiff', label: 'TIFF' }, { value: 'tiff-cmyk', label: 'TIFF CMYK (print, 300 dpi)' }, { value: 'bmp', label: 'BMP' }, { value: 'ico', label: 'Icon .ico (16–256 px)' }]} />
+            <Select value={format} onChange={setFormat} options={[{ value: 'jpeg', label: 'JPEG' }, { value: 'png', label: 'PNG (lossless, transparency)' }, { value: 'webp', label: 'WebP' }, { value: 'psd', label: 'Photoshop PSD (layers, groups, styles)' }, { value: 'pdf', label: 'PDF' }, { value: 'svg', label: 'SVG (shapes & text stay vector)' }, { value: 'tiff', label: 'TIFF' }, { value: 'png16', label: 'PNG 16-bit' }, { value: 'tiff16', label: 'TIFF 16-bit' }, { value: 'tiff-cmyk', label: 'TIFF CMYK (print, 300 dpi)' }, { value: 'bmp', label: 'BMP' }, { value: 'ico', label: 'Icon .ico (16–256 px)' }]} />
           </Field>
           {format === 'psd' ? (
             <div className="hint">Keeps layers, groups, masks, blend modes, opacity, fill and layer styles. Text and shapes are saved as pixels.</div>
@@ -340,6 +347,7 @@ function ExportDialog() {
             <div className="hint">
               {format === 'svg' && 'Shape and text layers are written as editable vectors; photos and styled layers as embedded images.'}
               {format === 'tiff' && 'Uncompressed 8-bit RGB with transparency.'}
+              {(format === 'png16' || format === 'tiff16') && `16 bits per channel from the ${doc.depth ?? 8}-bit layers, composited in float (no 8-bit rounding).`}
               {format === 'tiff-cmyk' && 'Colour-managed CMYK separation for coated paper, transparency flattened on white.'}
               {format === 'bmp' && '32-bit with transparency.'}
               {format === 'ico' && 'Six sizes from 16 to 256 px in one icon file, for favicons and apps.'}
@@ -590,6 +598,218 @@ function CanvasSizeDialog() {
         </div>
         <Toggle label="Fill new area of bottom layer with background color" checked={extend} onChange={setExtend} />
       </div>
+    </Modal>
+  );
+}
+
+// ================================================================ content-aware scale
+
+const CAS_RATIOS: { label: string; r: number }[] = [
+  { label: '1:1', r: 1 },
+  { label: '4:5', r: 4 / 5 },
+  { label: '9:16', r: 9 / 16 },
+  { label: '16:9', r: 16 / 9 },
+  { label: '3:2', r: 3 / 2 },
+];
+
+function ContentAwareScaleDialog() {
+  const doc = store.doc!;
+  const layer = store.activeLayer;
+  const src = layer?.kind === 'raster' && !layer.text && !layer.shape ? layer.canvas : undefined;
+  const [w, setW] = useState(src?.width ?? doc.width);
+  const [h, setH] = useState(src?.height ?? doc.height);
+  const [amount, setAmount] = useState(100);
+  const [protectSel, setProtectSel] = useState(!!doc.selection);
+  const [protectSkin, setProtectSkin] = useState(true);
+  const preview = useRef<HTMLCanvasElement>(null);
+
+  // Ratio chips keep the longer side and change the other: a landscape → 9:16 keeps its height
+  const toRatio = (r: number) => {
+    if (!src) return;
+    const sw = src.width, sh = src.height;
+    if (sw / sh > r) {
+      setW(Math.round(sh * r));
+      setH(sh);
+    } else {
+      setW(sw);
+      setH(Math.round(sw / r));
+    }
+  };
+
+  // Live preview on a small proxy: same algorithm, fast enough to follow the fields
+  useEffect(() => {
+    const cv = preview.current;
+    if (!src || !cv) return;
+    const t = setTimeout(() => {
+      const k = Math.min(1, 200 / Math.max(src.width, src.height, w, h));
+      const pw = Math.max(1, Math.round(src.width * k));
+      const ph = Math.max(1, Math.round(src.height * k));
+      const small = createCanvas(pw, ph);
+      ctx2d(small).drawImage(src, 0, 0, pw, ph);
+      const img = ctx2d(small).getImageData(0, 0, pw, ph);
+      let protect: Float32Array | undefined;
+      if (protectSel && doc.selection && layer) {
+        const sc = createCanvas(pw, ph);
+        ctx2d(sc).drawImage(doc.selection.canvas, layer.x, layer.y, src.width, src.height, 0, 0, pw, ph);
+        const a = ctx2d(sc).getImageData(0, 0, pw, ph).data;
+        protect = new Float32Array(pw * ph);
+        for (let i = 0; i < protect.length; i++) protect[i] = a[i * 4 + 3] / 255;
+      }
+      const out = contentAwareScale({ data: img.data, width: pw, height: ph }, Math.max(1, w * k), Math.max(1, h * k), { amount: amount / 100, protect, protectSkin });
+      cv.width = out.width;
+      cv.height = out.height;
+      ctx2d(cv).putImageData(new ImageData(out.data as Uint8ClampedArray<ArrayBuffer>, out.width, out.height, { colorSpace: img.colorSpace }), 0, 0);
+    }, 120);
+    return () => clearTimeout(t);
+  }, [src, w, h, amount, protectSel, protectSkin, doc.selection, layer]);
+
+  const apply = () => {
+    close();
+    void ops.contentAwareScale(Math.round(w), Math.round(h), { amount, protectSelection: protectSel, protectSkin });
+  };
+  if (!src) {
+    return (
+      <Modal title="Content-Aware Scale" onClose={close} footer={<button className="btn primary" onClick={close}>OK</button>}>
+        <p className="hint">Select a pixel layer (a photo) first. Text, shapes and adjustments can be scaled normally.</p>
+      </Modal>
+    );
+  }
+  return (
+    <Modal
+      title="Content-Aware Scale"
+      onClose={close}
+      onSubmit={apply}
+      footer={
+        <>
+          <button className="btn ghost" onClick={close}>Cancel</button>
+          <button className="btn primary" onClick={apply}>Scale</button>
+        </>
+      }
+    >
+      <p className="hint">Changes the shape of the photo by removing or adding low-detail areas (sky, walls, floor), so people and objects aren't squashed.</p>
+      <div className="cas-preview" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 210, background: 'var(--bg-2, #1b1b1f)', borderRadius: 6, margin: '8px 0' }}>
+        <canvas ref={preview} data-testid="cas-preview" style={{ maxWidth: '100%', maxHeight: 200, imageRendering: 'auto' }} />
+      </div>
+      <div className="crop-chips">
+        {CAS_RATIOS.map((c) => (
+          <button key={c.label} className="preset-chip" onClick={() => toRatio(c.r)} title={`Reshape to ${c.label}, keeping the longer side`}>
+            {c.label}
+          </button>
+        ))}
+        <button className="preset-chip" onClick={() => { setW(src.width); setH(src.height); }}>Original</button>
+      </div>
+      <div className="form-grid">
+        <Field label="Width (px)"><NumInput autoFocus value={w} onChange={setW} /></Field>
+        <Field label="Height (px)"><NumInput value={h} onChange={setH} /></Field>
+      </div>
+      <Slider label="Amount" value={amount} min={0} max={100} def={100} unit="%" onChange={setAmount} />
+      {doc.selection && <Toggle label="Protect the selection" checked={protectSel} onChange={setProtectSel} />}
+      <Toggle label="Protect skin tones" checked={protectSkin} onChange={setProtectSkin} />
+    </Modal>
+  );
+}
+
+// ================================================================ sky replacement
+
+/** The picture and its sky mask on a small copy (found once per dialog; options only re-compose). */
+function skyBase(doc: Doc) {
+  const k = Math.min(1, 420 / Math.max(doc.width, doc.height));
+  const w = Math.max(1, Math.round(doc.width * k));
+  const h = Math.max(1, Math.round(doc.height * k));
+  const full = createCanvas(doc.width, doc.height);
+  renderDocument(doc, full);
+  const photo = createCanvas(w, h);
+  ctx2d(photo).drawImage(full, 0, 0, w, h);
+  let alpha: Float32Array | null = null;
+  if (doc.selection) {
+    const sc = createCanvas(w, h);
+    ctx2d(sc).drawImage(doc.selection.canvas, 0, 0, w, h);
+    const a = ctx2d(sc).getImageData(0, 0, w, h).data;
+    alpha = new Float32Array(w * h);
+    for (let i = 0; i < alpha.length; i++) alpha[i] = a[i * 4 + 3] / 255;
+  } else {
+    const d = ctx2d(photo).getImageData(0, 0, w, h);
+    const r = selectSkyRegion({ data: d.data, w, h });
+    if (r) alpha = alphaFromRegion(r, w, h);
+  }
+  if (!alpha || !alpha.some((v) => v > 0.5)) return { ok: false as const, status: 'No sky found here: select the sky first (Select ▸ Sky, or a marquee).' };
+  return { ok: true as const, photo, alpha, w, h, k, status: doc.selection ? 'Replacing the selected area.' : 'Sky found automatically.' };
+}
+
+function SkyReplaceDialog() {
+  const doc = store.doc!;
+  const [o, setO] = useState<SkyOptions>(() => ({ ...DEFAULT_SKY }));
+  const preview = useRef<HTMLCanvasElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const base = useMemo(() => skyBase(doc), [doc]);
+  const set = (patch: Partial<SkyOptions>) => setO((p) => ({ ...p, ...patch }));
+
+  useEffect(() => {
+    const cv = preview.current;
+    if (!base.ok || !cv) return;
+    const t = setTimeout(() => {
+      const parts = buildSky(base.alpha, base.w, base.h, o, base.k);
+      const out = composeSky(base.photo, parts, o.lighting, base.w, base.h);
+      cv.width = base.w;
+      cv.height = base.h;
+      ctx2d(cv).drawImage(out, 0, 0);
+    }, 60);
+    return () => clearTimeout(t);
+  }, [o, base]);
+
+  const apply = () => {
+    if (!base.ok) return;
+    close();
+    void ops.replaceSky(o);
+  };
+  const presetId = o.source.kind === 'preset' ? o.source.id : null;
+  return (
+    <Modal
+      title="Sky Replacement"
+      wide
+      onClose={close}
+      onSubmit={apply}
+      footer={
+        <>
+          <button className="btn ghost" onClick={close}>Cancel</button>
+          <button className="btn primary" data-sky-apply onClick={apply} disabled={!base.ok}>Replace Sky</button>
+        </>
+      }
+    >
+      <p className="hint" data-sky-status>{base.status} The result is an editable group (Sky with a mask, Foreground Lighting); your photo isn't changed.</p>
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 240, background: 'var(--bg-2, #1b1b1f)', borderRadius: 6, margin: '8px 0' }}>
+        <canvas ref={preview} data-testid="sky-preview" style={{ maxWidth: '100%', maxHeight: 300 }} />
+      </div>
+      <div className="crop-chips">
+        {SKY_PRESETS.map((p) => (
+          <button key={p.id} className={`preset-chip ${presetId === p.id ? 'active' : ''}`} data-sky-preset={p.id} onClick={() => set({ source: { kind: 'preset', id: p.id } })} style={{ background: `linear-gradient(${p.zenith}, ${p.horizon})`, color: '#fff', textShadow: '0 1px 2px #000' }}>
+            {p.label}
+          </button>
+        ))}
+        <button className={`preset-chip ${o.source.kind === 'image' ? 'active' : ''}`} onClick={() => fileRef.current?.click()} title="Use a photo of a sky">
+          Your image…
+        </button>
+        <button className="preset-chip" onClick={() => set({ seed: o.seed + 1 })} title="Other clouds / stars" disabled={o.source.kind !== 'preset'}>
+          New clouds
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          data-sky-file
+          style={{ display: 'none' }}
+          onChange={async (e) => {
+            const f = e.target.files?.[0];
+            e.target.value = '';
+            if (f) set({ source: { kind: 'image', canvas: await io.fileToCanvas(f, workingSpace()) } });
+          }}
+        />
+      </div>
+      <Slider label="Shift Edge" value={o.shiftEdge} min={-50} max={50} def={0} unit=" px" onChange={(v) => set({ shiftEdge: v })} />
+      <Slider label="Fade Edge" value={o.fadeEdge} min={0} max={100} def={4} unit=" px" onChange={(v) => set({ fadeEdge: v })} />
+      <Slider label="Sky Brightness" value={o.brightness} min={-100} max={100} def={0} onChange={(v) => set({ brightness: v })} />
+      <Slider label="Sky Temperature" value={o.temperature} min={-100} max={100} def={0} onChange={(v) => set({ temperature: v })} />
+      <Slider label="Foreground Lighting" value={o.lighting} min={0} max={100} def={40} unit="%" onChange={(v) => set({ lighting: v })} />
     </Modal>
   );
 }
@@ -961,6 +1181,10 @@ export function Dialogs() {
       return <ImageSizeDialog />;
     case 'canvasSize':
       return <CanvasSizeDialog />;
+    case 'contentAwareScale':
+      return <ContentAwareScaleDialog />;
+    case 'skyReplace':
+      return <SkyReplaceDialog />;
     case 'filter':
       return <FilterDialog filterId={d.filterId} smartIndex={d.smartIndex} initial={d.params} />;
     case 'number':
